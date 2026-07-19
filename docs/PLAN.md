@@ -164,8 +164,12 @@ Use strict TypeScript on Node.js 24 LTS. Pin the runtime in `.nvmrc`; do not tar
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "24.13.3",
-    "typescript": "7.0.2"
+    "eslint": "^10.7.0",
+    "react-doctor": "^0.8.1",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.64.0"
   }
 }
 ```
@@ -486,7 +490,7 @@ Use these response sets:
 | `agent_execution_failed` | `retry`, `abort` | Retry re-enters the failed Hermes worker; approval is unavailable. |
 | `codex_execution_failed` | `retry`, `abort` | Retry grants exactly one additional Codex attempt; approval is unavailable. |
 
-`accept_with_failed_validation` and `accept_with_review_findings` require a human message acknowledging the known failures. Append the reason to `overrideReasons`; neither response can produce ordinary `completed` status. For an exhausted validation, review, or Codex failure, a human retry/revise sets `maxAttempts = attempt + 1`; later exhaustion interrupts again. Retrying a failed Hermes worker does not alter the Codex attempt limit. Human approval must be explicit and reason-appropriate. Keep external side effects in separate nodes because an interrupted node restarts from its beginning when resumed.
+`accept_with_failed_validation` and `accept_with_review_findings` require a human message acknowledging the known failures, while `revise` requires nonempty corrective guidance for Codex. Append accepted failure reasons to `overrideReasons`; neither override response can produce ordinary `completed` status. For an exhausted validation, review, or Codex failure, a human retry/revise sets `maxAttempts = attempt + 1`; later exhaustion interrupts again. Retrying a failed Hermes worker does not alter the Codex attempt limit. Human approval must be explicit and reason-appropriate. Keep external side effects in separate nodes because an interrupted node restarts from its beginning when resumed.
 
 ### Complete
 
@@ -668,7 +672,7 @@ A new run refuses to reuse an existing ID unless resume is explicit.
 agent-workflow status 019abc...
 ```
 
-Show current status, checkpoint-derived completed and pending nodes, attempt count, validation summary, review decision, and human-interrupt reason without executing the graph.
+Show current status, pending nodes, checkpoint count, latest checkpoint ID, attempt count, validation summary, review decision, and active human-interrupt reason without executing the graph.
 
 ### Resume
 
@@ -750,7 +754,7 @@ A changed HEAD, changed branch, or detected persistent Git-visible Hermes mutati
 
 ### Validation timeout
 
-Mark the command failed and send the timeout details to Codex on the next allowed attempt.
+Spawn each worker or validation command in its own Unix process group. On timeout, send `SIGTERM` to the group, escalate to `SIGKILL` after the grace period, and clear the delayed kill when the group exits. Mark the command failed and send the timeout details to Codex on the next allowed attempt.
 
 ### Retry exhaustion
 

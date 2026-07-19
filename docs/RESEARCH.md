@@ -41,7 +41,7 @@ Checkpoint data remains a trust boundary even locally. State should contain only
 
 ## Subprocess boundary
 
-Hermes and Codex share one small subprocess runner built on `node:child_process.spawn()`, with an explicit cwd, argument array, timeout, captured UTF-8 text, and no shell. A common `CommandResult` avoids incompatible error formats without introducing an abstraction hierarchy. The workflow's project-root `.env` may set absolute `HERMES_PATH` and `CODEX_PATH` values through Node's built-in parser; target-repository environment files are not loaded.
+Hermes and Codex share one small subprocess runner built on `node:child_process.spawn()`, with an explicit cwd, argument array, timeout, captured UTF-8 text, and no shell. Each invocation gets its own Unix process group so timeout termination reaches descendants rather than only the immediate CLI or shell process. A common `CommandResult` avoids incompatible error formats without introducing an abstraction hierarchy. The workflow's project-root `.env` may set absolute `HERMES_PATH` and `CODEX_PATH` values through Node's built-in parser; target-repository environment files are not loaded.
 
 Codex receives its prompt as a normal argument, runs in the target repository with `workspace-write`, and returns a schema-validated final message. Hermes returns strict JSON for planning and review. Model output is untrusted input: missing keys, invalid decisions, or suggested commands are rejected rather than repaired heuristically. Planner review advice can escalate review but cannot suppress deterministic review rules for authentication, security, migrations, or public contracts.
 

@@ -395,6 +395,9 @@ export function buildGraph(
     ) {
       throw new Error(`${payload.response} requires an acknowledgement message.`);
     }
+    if (payload.response === "revise" && payload.message.trim().length === 0) {
+      throw new Error("revise requires corrective guidance in the human message.");
+    }
     const common: WorkflowStateUpdate = {
       status: "running",
       humanResponse: payload.response,
@@ -463,7 +466,11 @@ export function buildGraph(
     if (violation) return violation;
     const status = state.overrideReasons.length > 0 ? "completed_with_override" : "completed";
     logEvent("terminal", { runId: state.runId, status, attempt: state.attempt });
-    return { status, changedFiles: await changedFiles(state.repo) };
+    return {
+      ...clearRecoveryState(),
+      status,
+      changedFiles: await changedFiles(state.repo),
+    };
   };
 
   const failedNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
@@ -472,6 +479,7 @@ export function buildGraph(
       state.stopReason || state.boundaryEvidence || state.workerError?.stderr || "Workflow failed.";
     logEvent("terminal", { runId: state.runId, status: "failed", reason });
     return {
+      ...clearRecoveryState(),
       status: "failed",
       changedFiles: files,
       stopReason: reason,

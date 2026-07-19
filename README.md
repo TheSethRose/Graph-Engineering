@@ -39,6 +39,9 @@ LangGraph owns every transition. Agent output is parsed as data; it does not sel
 nvm use
 npm ci
 npm run build
+npm run typecheck
+npm run lint
+npm run doctor
 npm test
 npm link
 ```
@@ -108,4 +111,4 @@ The workflow uses strict TypeScript with the required `@langchain/core` peer, `@
 
 ## Verification
 
-`npm test` builds the project and runs focused `node:test` coverage for command failures, strict worker output, Git preflight, trusted validation sources, routing, retry exhaustion, optional review, SQLite persistence, interrupts, resume, override completion, boundary violations, locking, leases, fingerprints, and the compiled CLI.
+`npm run typecheck` and `npm run lint` enforce the TypeScript and ESLint contracts. `npm run doctor` runs its configured tooling and supply-chain checks; this repository is not a React project, so React-only rules are expected to report as gated rather than applicable. `npm test` builds the project and runs focused `node:test` coverage for command failures, strict worker output, Git preflight, trusted validation sources, routing, retry exhaustion, optional review, SQLite persistence, interrupts, resume, override completion, boundary violations, locking, leases, fingerprints, and the compiled CLI.

@@ -277,6 +277,9 @@ async function resume(parsed: Parsed): Promise<void> {
       ) {
         throw new Error(`${response} requires --message acknowledging the known failure.`);
       }
+      if (response === "revise" && message.trim().length === 0) {
+        throw new Error("revise requires --message with corrective guidance.");
+      }
       if (response !== "provide_validation" && validationCommands.length > 0) {
         throw new Error("--validate is allowed only with provide_validation.");
       }

@@ -55,6 +55,7 @@ export async function runCommand(
       cwd: options.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       if (Buffer.byteLength(stdout) <= maxBytes) stdout += chunk;
@@ -65,13 +66,27 @@ export async function runCommand(
     child.on("error", (error) => {
       spawnError = error;
     });
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const killProcessGroup = (signal: NodeJS.Signals): void => {
+      if (!child.pid) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          spawnError = error instanceof Error ? error : new Error(String(error));
+          child.kill(signal);
+        }
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 1_000).unref();
+      killProcessGroup("SIGTERM");
+      forceKillTimer = setTimeout(() => killProcessGroup("SIGKILL"), 1_000);
+      forceKillTimer.unref();
     }, options.timeoutMs);
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         argv: options.recordedArgv ?? [executable, ...args],
         exitCode: spawnError ? null : code,
