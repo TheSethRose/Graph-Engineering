@@ -56,6 +56,7 @@ async function trackedConfig(repo: string): Promise<z.infer<typeof RepoConfigSch
   } catch (error) {
     throw new Error(
       `Invalid .agent-workflow.json: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }

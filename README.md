@@ -96,7 +96,7 @@ An unexpected exception caught by the CLI preserves the last checkpoint and work
 - An authenticated Codex CLI
 - A clean local Git repository to operate on
 
-The workflow uses strict TypeScript with `@langchain/langgraph`, `@langchain/langgraph-checkpoint-sqlite`, and Zod. Node's standard library provides the CLI, subprocess, filesystem, hashing, and test surfaces; there is no server framework, ORM, queue, broad LangChain package, or test framework.
+The workflow uses strict TypeScript with the required `@langchain/core` peer, `@langchain/langgraph`, `@langchain/langgraph-checkpoint-sqlite`, and Zod. Node's standard library provides the CLI, subprocess, filesystem, hashing, and test surfaces; there is no server framework, ORM, queue, broad LangChain package, or test framework.
 
 ## Implemented components
 

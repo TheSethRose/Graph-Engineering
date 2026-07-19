@@ -10,9 +10,12 @@
 
 - Select the pinned runtime and install the lockfile exactly: `nvm use && npm ci`.
 - Build and type-check: `npm run build`.
+- Run standalone type-checking: `npm run typecheck`.
+- Run linting: `npm run lint`.
+- Run the configured tooling and supply-chain scan: `npm run doctor`. Read its diagnostics; a zero exit alone does not mean every check applied.
+- Ensure all issues found by typecheck, linting, or `npm run doctor` are resolved.
 - Run the full gate after source or test changes: `npm test`. It rebuilds before running all compiled `node:test` files.
 - Run one focused file while iterating, for example: `npm run build && node --test dist/tests/routing.test.js`.
-- Run the configured tooling and supply-chain scan after dependency or tooling changes: `npm run doctor`. Read its diagnostics; a zero exit alone does not mean every check applied.
 - Build before exercising the unlinked CLI with `npm run agent-workflow -- <command>`. `npm link` is optional for the global `agent-workflow` command described in the README.
 
 ## Code and Architecture

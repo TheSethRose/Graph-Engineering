@@ -215,7 +215,7 @@ export async function withProcessLock<T>(
           live = (killError as NodeJS.ErrnoException).code !== "ESRCH";
         }
       }
-      if (live) throw new Error(`Another agent-workflow writer is active (PID ${pid}).`);
+      if (live) throw new Error(`Another agent-workflow writer is active (PID ${pid}).`, { cause: error });
       await unlink(lockPath);
     }
   }
@@ -235,7 +235,7 @@ async function readLeases(dataRoot: string): Promise<Leases> {
     return LeasesSchema.parse(value);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new Error("active-runs.json is malformed; refusing to alter repository leases.");
+    throw new Error("active-runs.json is malformed; refusing to alter repository leases.", { cause: error });
   }
 }
 

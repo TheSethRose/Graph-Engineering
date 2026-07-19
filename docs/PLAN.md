@@ -158,6 +158,7 @@ Use strict TypeScript on Node.js 24 LTS. Pin the runtime in `.nvmrc`; do not tar
     "node": ">=24 <25"
   },
   "dependencies": {
+    "@langchain/core": "1.2.3",
     "@langchain/langgraph": "1.4.8",
     "@langchain/langgraph-checkpoint-sqlite": "1.0.3",
     "zod": "4.4.3"

@@ -12,17 +12,23 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && node --test dist/tests/*.test.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "doctor": "react-doctor",
     "agent-workflow": "node dist/src/cli.js"
   },
   "dependencies": {
+    "@langchain/core": "1.2.3",
     "@langchain/langgraph": "1.4.8",
     "@langchain/langgraph-checkpoint-sqlite": "1.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "24.13.3",
+    "eslint": "^10.7.0",
     "react-doctor": "^0.8.1",
-    "typescript": "7.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.64.0"
   }
 }
