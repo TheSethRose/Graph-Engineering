@@ -18,6 +18,7 @@ function boundaryOrWorkerFailure(
   state: WorkflowStateValue,
 ): "failed" | "human" | undefined {
   if (state.boundaryViolation) return "failed";
+  if (state.humanReason) return "human";
   if (state.workerErrorSource) return "human";
   return undefined;
 }
@@ -41,6 +42,7 @@ export function routeAfterCoder(
   state: WorkflowStateValue,
 ): "validation" | "coder" | "human" | "failed" {
   if (state.boundaryViolation) return "failed";
+  if (state.humanReason) return "human";
   if (state.workerErrorSource === "coder") {
     return state.attemptsExhausted ? "human" : "coder";
   }
@@ -51,6 +53,7 @@ export function routeAfterValidation(
   state: WorkflowStateValue,
 ): "coder" | "reviewer" | "human" | "complete" | "failed" {
   if (state.boundaryViolation) return "failed";
+  if (state.humanReason) return "human";
   if (!state.validationPassed) {
     return state.attemptsExhausted ? "human" : "coder";
   }
@@ -71,7 +74,7 @@ export function routeAfterReview(
 
 export function routeAfterHuman(
   state: WorkflowStateValue,
-): "planner" | "research" | "coder" | "reviewer" | "complete" | "failed" {
+): "planner" | "research" | "coder" | "validation" | "reviewer" | "complete" | "failed" {
   if (state.humanResponse === "abort") return "failed";
   if (
     state.humanResponse === "approve" ||

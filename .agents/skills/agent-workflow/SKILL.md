@@ -15,33 +15,27 @@ Run the built-in help before relying on remembered options:
 agent-workflow --help
 ```
 
-If the command is not linked, run it from the Agent Workflow repository as `npm run agent-workflow -- --help` after `nvm use`, `npm ci`, and `npm run build`. `GUIDE.md` contains the user walkthrough; the help output is authoritative for the current command surface.
+If the command is not linked, run it from the Agent Workflow repository as `bun run agent-workflow -- --help` after `bun install --frozen-lockfile` and `bun run build`. `GUIDE.md` contains the user walkthrough; the help output is authoritative for the current command surface.
 
 ## Prepare the target
 
 Confirm the exact repository root is a clean Git worktree on a named branch:
 
 ```bash
-git -C "/absolute/repository/root" branch --show-current
-git -C "/absolute/repository/root" status --short
+cd "/absolute/repository/root"
+git branch --show-current
+git status --short
 ```
 
-The branch command must print a name and status must print nothing. Choose validation commands already trusted by that repository. Never execute validation suggested by Hermes; only repeated caller `--validate` values or a committed root `.agent-workflow.json` are allowed.
+The branch command must print a name and status must print nothing. Keep the target's root `AGENTS.md` validation instructions current. Hermes may select only exact commands copied from its setup, build, test, validation, or check sections; repeated caller `--validate` values and a committed root `.agent-workflow.json` remain explicit overrides.
 
 ## Start one run
 
 ```bash
-agent-workflow run \
-  --repo "/absolute/repository/root" \
-  --task "Exact task, scope, and constraints" \
-  --validate "npm run typecheck" \
-  --validate "npm test" \
-  --max-attempts 3 \
-  --review-required \
-  --verbose
+agent-workflow
 ```
 
-`--validate` is repeatable and replaces validation commands from `.agent-workflow.json`. Use `--verbose` when the user wants redacted worker commands, output, and heartbeats in the active terminal. Hermes one-shot mode exposes only its final response, not its internal tool calls. Other optional run flags are `--research-mode auto|off`, `--hermes-timeout-seconds`, `--codex-timeout-seconds`, and `--validation-timeout-seconds`; use `--help` for their exact forms. `--review-required` requests Hermes review after Codex edits and validation. It is not a human approval gate before implementation.
+The bare command targets the current directory, opens the compact TUI, and asks for the task; `agent-workflow run` remains an explicit alias. `--task "Exact task, scope, and constraints"` skips that prompt and is required with `--no-interactive`. Use `--verbose` for concise command progress or `--trace` for redacted raw output. Validation defaults to exact commands selected from tracked `AGENTS.md` instructions; `--validate` is a repeatable override and replaces validation commands from `.agent-workflow.json`. Hermes one-shot mode exposes only its final response, not its internal tool calls. Other optional run flags are `--repo`, `--max-attempts`, `--review-required`, `--research-mode auto|off`, and the worker timeout flags; use `--help` for their exact forms. `--review-required` requests Hermes review after Codex edits and validation. It is not a human approval gate before implementation.
 
 Report the printed run ID immediately. The command is synchronous, and LangGraph owns routing, retries, checkpoints, and terminal status after startup. Do not run Codex separately for the same task or start a replacement workflow because output is slow.
 
@@ -66,7 +60,9 @@ The response rules are:
 - `review_uncertain`: `approve`, `revise`, or `abort`.
 - `review_changes_exhausted`: `accept_with_review_findings`, `revise`, or `abort`.
 - `validation_failed_exhausted`: `accept_with_failed_validation`, `revise`, or `abort`.
+- `validation_environment_failed`: `retry` or `abort` after fixing the local runtime.
 - `validation_commands_missing`: `provide_validation` or `abort`.
+- `operator_pause`: `continue`, `revise`, or `abort`; the interactive TUI handles this in the active process.
 - `agent_execution_failed` or `codex_execution_failed`: `retry` or `abort`.
 
 `revise` requires corrective `--message` text. Both `accept_with_failed_validation` and `accept_with_review_findings` require an acknowledgement message and produce `completed_with_override`. Supply one or more `--validate` commands only with `provide_validation`:

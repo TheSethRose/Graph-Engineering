@@ -19,13 +19,19 @@ import {
   assertGitInvariants,
   changedFiles,
   getDataRoot,
-  logEvent,
   reviewDiff,
   worktreeEvidence,
   worktreeFingerprint,
   type GitBaseline,
 } from "./checkpoint.js";
-import { coderPrompt, plannerPrompt, researchPrompt, reviewerPrompt } from "./prompts.js";
+import { logEvent } from "./events.js";
+import {
+  coderPrompt,
+  compactModelOutput,
+  plannerPrompt,
+  researchPrompt,
+  reviewerPrompt,
+} from "./prompts.js";
 import {
   routeAfterCoder,
   routeAfterHuman,
@@ -43,13 +49,19 @@ import {
   type WorkflowStateUpdate,
   type WorkflowStateValue,
 } from "./state.js";
-import { runValidationCommand } from "./validation.js";
+import {
+  isValidationEnvironmentFailure,
+  runValidationCommand,
+  trustedAgentValidationCommands,
+} from "./validation.js";
 
 type Dependencies = {
   hermes: typeof runHermes;
   codex: typeof runCodex;
   validate: typeof runValidationCommand;
+  trustedValidation: typeof trustedAgentValidationCommands;
   dataRoot: string;
+  pauseRequested: () => boolean;
 };
 
 const ResumePayloadSchema = z.strictObject({
@@ -171,8 +183,18 @@ export function buildGraph(
     hermes: overrides.hermes ?? runHermes,
     codex: overrides.codex ?? runCodex,
     validate: overrides.validate ?? runValidationCommand,
+    trustedValidation: overrides.trustedValidation ?? trustedAgentValidationCommands,
     dataRoot: overrides.dataRoot ?? getDataRoot(),
+    pauseRequested: overrides.pauseRequested ?? (() => false),
   };
+
+  const operatorPause = (
+    update: WorkflowStateUpdate,
+    resumeTarget: "research" | "coder" | "validation" | "reviewer",
+  ): WorkflowStateUpdate =>
+    deps.pauseRequested()
+      ? { ...update, humanReason: "operator_pause", resumeTarget }
+      : update;
 
   const plannerNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
     const fingerprint = await worktreeFingerprint(baseline(state));
@@ -193,13 +215,19 @@ export function buildGraph(
       };
     }
     const output = call.output as PlannerOutput;
+    const agentCommands =
+      state.validationCommands.length === 0
+        ? await deps.trustedValidation(state.repo, output.validation_commands)
+        : [];
+    const validationCommands =
+      state.validationCommands.length > 0 ? state.validationCommands : agentCommands;
     const riskReasons = trustedReviewRisks(state.task);
     const reviewRequired =
       output.review_required ||
       state.userRequestedReview ||
       riskReasons.length > 0 ||
       !output.validation_coverage_complete;
-    return {
+    const update: WorkflowStateUpdate = {
       ...clearRecoveryState(),
       plan: output.plan,
       researchRequired: output.research_required,
@@ -209,10 +237,18 @@ export function buildGraph(
       reviewRiskReasons: riskReasons,
       validationCoverageComplete: output.validation_coverage_complete,
       plannerSuggestedValidationCommands: output.validation_commands,
-      ...(state.validationCommands.length === 0
+      ...(agentCommands.length > 0
+        ? { validationCommands: agentCommands, validationSource: "agents" as const }
+        : {}),
+      ...(validationCommands.length === 0
         ? { humanReason: "validation_commands_missing" as const }
         : {}),
     };
+    if (validationCommands.length === 0) return update;
+    return operatorPause(
+      update,
+      output.research_required && state.researchMode === "auto" ? "research" : "coder",
+    );
   };
 
   const researchNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
@@ -233,10 +269,10 @@ export function buildGraph(
         humanReason: "agent_execution_failed",
       };
     }
-    return {
+    return operatorPause({
       ...clearRecoveryState(),
       researchFindings: (call.output as ResearchOutput).findings,
-    };
+    }, "coder");
   };
 
   const coderNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
@@ -253,7 +289,7 @@ export function buildGraph(
     const files = await changedFiles(state.repo);
     if (!call.summary) {
       const retry = withNextAttempt(state);
-      return {
+      const update: WorkflowStateUpdate = {
         ...workerFailure("coder", call.result),
         ...retry,
         changedFiles: files,
@@ -261,11 +297,12 @@ export function buildGraph(
           ? { humanReason: "codex_execution_failed" as const }
           : {}),
       };
+      return retry.attemptsExhausted ? update : operatorPause(update, "coder");
     }
     const risks = [
       ...new Set([...state.reviewRiskReasons, ...trustedReviewRisks(state.task, files)]),
     ];
-    return {
+    return operatorPause({
       ...clearRecoveryState(),
       implementationResult: call.result,
       implementationSummary: call.summary,
@@ -273,7 +310,7 @@ export function buildGraph(
       reviewRiskReasons: risks,
       reviewRequired: state.reviewRequired || risks.length > 0,
       attemptsExhausted: false,
-    };
+    }, "validation");
   };
 
   const validationNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
@@ -290,10 +327,20 @@ export function buildGraph(
       results.length === state.validationCommands.length &&
       results.every((result) => result.exitCode === 0 && !result.timedOut);
     if (passed) {
-      return { validationResults: results, validationPassed: true, attemptsExhausted: false };
+      const update = { validationResults: results, validationPassed: true, attemptsExhausted: false };
+      return state.reviewRequired ? operatorPause(update, "reviewer") : update;
+    }
+    if (results.some(isValidationEnvironmentFailure)) {
+      return {
+        validationResults: results,
+        validationPassed: false,
+        attemptsExhausted: false,
+        humanReason: "validation_environment_failed",
+        resumeTarget: "validation",
+      };
     }
     const retry = withNextAttempt(state);
-    return {
+    const update: WorkflowStateUpdate = {
       validationResults: results,
       validationPassed: false,
       ...retry,
@@ -301,6 +348,7 @@ export function buildGraph(
         ? { humanReason: "validation_failed_exhausted" as const }
         : {}),
     };
+    return retry.attemptsExhausted ? update : operatorPause(update, "coder");
   };
 
   const reviewerNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
@@ -327,7 +375,7 @@ export function buildGraph(
     const output = call.output as ReviewOutput;
     if (output.decision === "changes_requested") {
       const retry = withNextAttempt(state);
-      return {
+      const update: WorkflowStateUpdate = {
         ...clearRecoveryState(),
         reviewDecision: output.decision,
         reviewResult: output.findings,
@@ -336,6 +384,7 @@ export function buildGraph(
           ? { humanReason: "review_changes_exhausted" as const }
           : {}),
       };
+      return retry.attemptsExhausted ? update : operatorPause(update, "coder");
     }
     return {
       ...clearRecoveryState(),
@@ -374,7 +423,7 @@ export function buildGraph(
         validation_summary: state.validationResults
           .flatMap((result) => {
             const out = result.stderr || result.stdout;
-            return out ? [out] : [];
+            return out ? [compactModelOutput(out)] : [];
           })
           .join("\n"),
         review_summary: state.reviewResult ?? "",
@@ -399,6 +448,7 @@ export function buildGraph(
       throw new Error("revise requires corrective guidance in the human message.");
     }
     const common: WorkflowStateUpdate = {
+      ...clearRecoveryState(),
       status: "running",
       humanResponse: payload.response,
       humanMessage: payload.message,
@@ -407,6 +457,7 @@ export function buildGraph(
       return { ...common, stopReason: payload.message || `Human aborted ${state.humanReason}.` };
     }
     if (payload.response === "approve") return common;
+    if (payload.response === "continue") return { ...common, resumeTarget: state.resumeTarget };
     if (payload.response === "accept_with_failed_validation") {
       return {
         ...common,
@@ -453,11 +504,18 @@ export function buildGraph(
       }
       return { ...common, resumeTarget: state.workerErrorSource };
     }
+    if (payload.response === "retry" && state.humanReason === "validation_environment_failed") {
+      return { ...common, resumeTarget: "validation" };
+    }
     if (payload.response === "revise") {
+      const nextAttempt =
+        state.humanReason === "operator_pause" && state.resumeTarget !== "validation"
+          ? state.attempt
+          : state.attempt + 1;
       return {
         ...common,
-        attempt: state.attempt + 1,
-        maxAttempts: Math.max(state.maxAttempts, state.attempt + 1),
+        attempt: nextAttempt,
+        maxAttempts: Math.max(state.maxAttempts, nextAttempt),
         attemptsExhausted: false,
         resumeTarget: "coder",
       };
@@ -549,6 +607,7 @@ export function buildGraph(
       planner: "planner",
       research: "research",
       coder: "coder",
+      validation: "validation",
       reviewer: "reviewer",
       complete: "complete",
       failed: "failed",

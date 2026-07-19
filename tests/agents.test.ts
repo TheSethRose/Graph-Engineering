@@ -4,7 +4,7 @@ import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import test from "node:test";
+import { test } from "bun:test";
 import {
   loadAgentEnvironment,
   redact,
@@ -23,9 +23,10 @@ test("agent executable paths load from an explicit env file", async () => {
     delete process.env.HERMES_PATH;
     delete process.env.CODEX_PATH;
     await writeFile(path, "HERMES_PATH=/custom/hermes\nCODEX_PATH=/custom/codex\n");
+    process.env.CODEX_PATH = "/already/exported/codex";
     loadAgentEnvironment(path);
     assert.equal(process.env.HERMES_PATH, "/custom/hermes");
-    assert.equal(process.env.CODEX_PATH, "/custom/codex");
+    assert.equal(process.env.CODEX_PATH, "/already/exported/codex");
   } finally {
     if (originalHermes === undefined) delete process.env.HERMES_PATH;
     else process.env.HERMES_PATH = originalHermes;
@@ -55,7 +56,7 @@ test("runCommand captures success, failure, missing executables, timeout, and tr
     timeoutMs: 2_000,
   });
   assert.equal(missing.exitCode, null);
-  assert.match(missing.stderr, /ENOENT/);
+  assert.match(missing.stderr, /ENOENT|Executable not found/);
 
   const timeout = await runCommand(process.execPath, ["-e", "setTimeout(()=>{}, 10000)"], {
     cwd: process.cwd(),
@@ -72,30 +73,38 @@ test("runCommand captures success, failure, missing executables, timeout, and tr
   assert.equal(redact("token=abc123456 secret: hidden-value"), "token=[REDACTED] secret: [REDACTED]");
 });
 
-test("verbose command tracing shows redacted commands, output, and completion", async () => {
+test("command tracing separates concise progress from redacted raw output", async () => {
   const originalWrite = process.stderr.write;
   let trace = "";
   process.stderr.write = ((chunk: string | Uint8Array) => {
     trace += chunk.toString();
     return true;
   }) as typeof process.stderr.write;
-  setCommandTracing(true);
   try {
+    setCommandTracing("summary");
     await runCommand(
       process.execPath,
       ["-e", "process.stdout.write('token=hidden-value\\nfinished')"],
       { cwd: process.cwd(), timeoutMs: 2_000, traceLabel: "test" },
     );
+    assert.match(trace, /"event":"command_start"/);
+    assert.match(trace, /"label":"test"/);
+    assert.match(trace, /"event":"command_complete"/);
+    assert.doesNotMatch(trace, /"event":"command_output"/);
+
+    trace = "";
+    setCommandTracing("full");
+    await runCommand(
+      process.execPath,
+      ["-e", "process.stdout.write('token=hidden-value\\nfinished')"],
+      { cwd: process.cwd(), timeoutMs: 2_000, traceLabel: "test" },
+    );
+    assert.match(trace, /token=\[REDACTED\]/);
+    assert.doesNotMatch(trace, /hidden-value/);
   } finally {
     setCommandTracing(false);
     process.stderr.write = originalWrite;
   }
-
-  assert.match(trace, /"event":"command_start"/);
-  assert.match(trace, /"label":"test"/);
-  assert.match(trace, /token=\[REDACTED\]/);
-  assert.doesNotMatch(trace, /hidden-value/);
-  assert.match(trace, /"event":"command_complete"/);
 });
 
 test("runCommand terminates descendant processes when it times out", async () => {

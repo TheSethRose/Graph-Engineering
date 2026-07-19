@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "bun:test";
 import {
   routeAfterCoder,
   routeAfterHuman,
@@ -59,6 +59,12 @@ test("Codex and validation retry only before deterministic exhaustion", () => {
 
   assert.equal(routeAfterValidation(state({ validationPassed: false })), "coder");
   assert.equal(
+    routeAfterValidation(
+      state({ validationPassed: false, humanReason: "validation_environment_failed" }),
+    ),
+    "human",
+  );
+  assert.equal(
     routeAfterValidation(state({ validationPassed: false, attemptsExhausted: true })),
     "human",
   );
@@ -93,5 +99,9 @@ test("review and human outcomes use explicit routes", () => {
   assert.equal(
     routeAfterHuman(state({ humanResponse: "retry", resumeTarget: "research" })),
     "research",
+  );
+  assert.equal(
+    routeAfterHuman(state({ humanResponse: "continue", resumeTarget: "validation" })),
+    "validation",
   );
 });

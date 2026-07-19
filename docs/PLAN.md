@@ -12,7 +12,7 @@ Build a minimal graph-based development workflow where:
 
 The system must remain small, local, and understandable. It is not a general-purpose agent platform.
 
-**Status:** Implemented local architecture in strict TypeScript on Node.js 24 LTS. The first release includes the fixed graph, CLI, SQLite persistence, tests, and repository-local Hermes skill described below.
+**Status:** Implemented local architecture in strict TypeScript on Bun. The first release includes the fixed graph, CLI, Bun-native SQLite persistence, tests, terminal UI, and repository-local Hermes skill described below.
 
 ## Goal
 
@@ -81,9 +81,9 @@ Deterministic project commands validate the change. Their exit codes are authori
 Examples include:
 
 ```bash
-npm test
-npm run typecheck
-npm run lint
+bun run test
+bun run typecheck
+bun run lint
 pytest
 cargo test
 go test ./...
@@ -118,9 +118,8 @@ It supports one clean local Git repository on macOS or Unix, one Codex worker, H
 ```text
 graph-engineering/
 ├── package.json
-├── package-lock.json
+├── bun.lock
 ├── tsconfig.json
-├── .nvmrc
 ├── .env.example
 ├── README.md
 ├── docs/
@@ -129,9 +128,12 @@ graph-engineering/
 │   └── graph-engineering-infographic.png
 ├── .gitignore
 ├── .agents/skills/agent-workflow/SKILL.md
+├── compat/better-sqlite3/
 ├── src/
 │   ├── cli.ts
+│   ├── events.ts
 │   ├── graph.ts
+│   ├── tui.ts
 │   ├── state.ts
 │   ├── routing.ts
 │   ├── agents.ts
@@ -140,7 +142,9 @@ graph-engineering/
 │   └── checkpoint.ts
 ├── tests/
 │   ├── agents.test.ts
+│   ├── cli.test.ts
 │   ├── routing.test.ts
+│   ├── tui.test.ts
 │   ├── validation.test.ts
 │   └── graph.test.ts
 ```
@@ -149,32 +153,37 @@ Keep modules small. Do not introduce dependency-injection frameworks, repository
 
 ## Dependencies
 
-Use strict TypeScript on Node.js 24 LTS. Pin the runtime in `.nvmrc`; do not target the locally installed Node.js Current release as the compatibility baseline.
+Use strict TypeScript on Bun 1.3 or newer. Bun owns installation, execution, tests, global linking, and SQLite.
 
 ```json
 {
   "type": "module",
+  "packageManager": "bun@1.3.13",
   "engines": {
-    "node": ">=24 <25"
+    "bun": ">=1.3 <2"
   },
   "dependencies": {
     "@langchain/core": "1.2.3",
     "@langchain/langgraph": "1.4.8",
     "@langchain/langgraph-checkpoint-sqlite": "1.0.3",
+    "better-sqlite3": "file:./compat/better-sqlite3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "24.13.3",
+    "@types/bun": "1.3.14",
     "eslint": "^10.7.0",
     "react-doctor": "^0.8.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.64.0"
+  },
+  "overrides": {
+    "better-sqlite3": "file:./compat/better-sqlite3"
   }
 }
 ```
 
-Exact package versions are resolved in `package-lock.json`. Do not install the broad `langchain` package, a CLI framework, an ORM, a subprocess wrapper, or a test framework unless a concrete gap appears. Use `node:child_process`, `node:crypto`, `node:fs`, `node:path`, `node:test`, `node:util`, and `crypto.randomUUID()` from Node.js.
+Exact package versions are resolved in `bun.lock`. The local `better-sqlite3` compatibility package maps the small synchronous driver surface required by the official LangGraph saver to `bun:sqlite`; do not copy or fork the saver itself. Do not install the broad `langchain` package, a CLI framework, an ORM, a subprocess wrapper, or another test framework unless a concrete gap appears. Use Bun's Node-compatible standard library for existing process and filesystem APIs and `bun:test` for tests.
 
 ## Prerequisites
 
@@ -221,7 +230,7 @@ export const WorkflowState = new StateSchema({
   implementationResult: CommandResultSchema.optional(),
 
   validationCommands: z.array(z.string()).default([]),
-  validationSource: z.enum(["cli", "repo_config"]).optional(),
+  validationSource: z.enum(["cli", "repo_config", "agents"]).optional(),
   validationResults: z.array(CommandResultSchema).default([]),
   validationPassed: z.boolean().optional(),
   validationCoverageComplete: z.boolean().default(false),
@@ -355,8 +364,8 @@ Expected output:
   "review_reason": "Change affects authentication behavior",
   "validation_coverage_complete": true,
   "validation_commands": [
-    "npm run typecheck",
-    "npm test"
+    "bun run typecheck",
+    "bun run test"
   ]
 }
 ```
@@ -365,7 +374,7 @@ Use `hermes -z` with a strict JSON-only prompt. Validate every routing field bef
 
 Catch expected Hermes CLI failures, timeouts, and structured-output parsing failures. Store `workerErrorSource = "planner"` plus `workerError`, then route to an `agent_execution_failed` interrupt. Unexpected application defects still throw and leave the last checkpoint intact.
 
-Planner-suggested validation commands are advisory and are never copied into executable state. They are displayed when trusted validation is missing so a human can supply commands explicitly.
+Planner-selected validation commands become executable only when each one exactly matches a command in a validation-related section of a tracked root `AGENTS.md`. Unmatched suggestions remain advisory, and the workflow pauses when no trusted command remains.
 
 ### Deterministic review escalation
 
@@ -394,7 +403,7 @@ The result is concise implementation input for Codex. Research never writes repo
 
 **Worker:** Codex CLI
 
-The coder receives the exact user task, Hermes plan, relevant research, prior validation failures, reviewer feedback, and attempt count. It must inspect the current working tree, preserve unrelated behavior, make only required edits, follow repository rules, run useful checks when practical, and leave a reviewable diff.
+The coder receives the exact user task, Hermes plan, relevant research, prior validation failures, reviewer feedback, and attempt count. Validation diagnostics are bounded before entering the prompt so one noisy command cannot consume the next attempt's context; the complete captured result remains in checkpoint state. Codex must inspect the current working tree, preserve unrelated behavior, make only required edits, follow repository rules, run useful checks when practical, and leave a reviewable diff.
 
 Invoke Codex directly and explicitly retain its sandbox:
 
@@ -420,16 +429,17 @@ A zero exit clears the worker-error fields and routes to validation. A nonzero e
 
 **Worker:** deterministic subprocesses
 
-Run trusted validation commands sequentially and stop at the first failure. Invoke each non-empty command through `/bin/sh -lc` because caller input and checked-in repository configuration are explicit trusted-code boundaries; package scripts can already execute arbitrary local code, so a partial shell parser would not create a meaningful security boundary. Hermes output is never passed to this shell.
+Run trusted validation commands sequentially and stop at the first failure. Invoke each non-empty command through `/bin/sh -c` so the command inherits the workflow environment. Caller input, checked-in configuration, and exact command matches from checked-in instructions are trusted-code boundaries; package scripts can already execute arbitrary local code, so a partial shell parser would not create a meaningful security boundary.
 
-Version one has exactly two trusted command sources:
+Version one has three trusted command sources, in precedence order:
 
 1. Repeated `--validate` arguments supplied by the caller.
 2. `validation_commands` in a Git-tracked `.agent-workflow.json` at the selected repository root.
+3. Planner selections that exactly match commands in setup, build, test, validation, or check sections of a regular, non-symlinked, Git-tracked root `AGENTS.md`.
 
-If CLI commands are present, they replace the JSON list rather than merging with it. Do not discover package scripts, infer commands from files, or execute planner suggestions. When neither trusted source provides a command, run the planner so it can recommend commands, then pause before Codex with interrupt reason `validation_commands_missing`. Resume requires caller-supplied `--validate` arguments or abort.
+CLI commands replace the JSON list rather than merging with it, and a non-empty JSON list suppresses automatic `AGENTS.md` selection. Do not discover package scripts or execute undocumented planner output. Negated command instructions and commands outside validation-related sections are not eligible. When no trusted source provides a command, pause before Codex with interrupt reason `validation_commands_missing`; resume requires caller-supplied `--validate` arguments or abort.
 
-Capture the argv, exit code, stdout, stderr, duration, and timeout. Validation passes only when every command exits `0`. Preserve critical failure output when feeding the next Codex attempt.
+Capture the argv, exit code, stdout, stderr, duration, and timeout. Validation passes only when every command exits `0`. Feed Codex and the reviewer a bounded head-and-tail excerpt instead of the entire captured result. A shell `127`, Node native-module ABI mismatch, or package-engine mismatch pauses as `validation_environment_failed` without incrementing the coding attempt; after correcting the environment, `retry` reruns validation directly.
 
 ```text
 validation failed
@@ -441,7 +451,7 @@ validation failed
 
 **Worker:** Hermes
 
-Run when requested by the user or planner, or when the change affects authentication, authorization, security, migrations, public APIs, or behavior that tests do not fully establish. Review the original task, plan, research, Git diff, validation results, and Codex summary.
+Run when requested by the user or planner, or when the change affects authentication, authorization, security, migrations, public APIs, or behavior that tests do not fully establish. Review the original task, plan, research, Git diff, validation results, and Codex summary. Bound the combined validation transcript and review diff before constructing the model prompt.
 
 The reviewer does not modify files and returns exactly one decision:
 
@@ -486,9 +496,11 @@ Use these response sets:
 | `review_uncertain` | `approve`, `revise`, `abort` | Approve completes normally; revise returns to Codex; abort stops. |
 | `review_changes_exhausted` | `accept_with_review_findings`, `revise`, `abort` | Acceptance completes as `completed_with_override`; revise grants exactly one additional Codex attempt. |
 | `validation_failed_exhausted` | `accept_with_failed_validation`, `revise`, `abort` | Acceptance completes as `completed_with_override`; revise grants exactly one additional Codex attempt. |
+| `validation_environment_failed` | `retry`, `abort` | Retry reruns validation without spending a Codex attempt. |
 | `validation_commands_missing` | `provide_validation`, `abort` | Continue only after caller-supplied trusted commands are provided. |
 | `agent_execution_failed` | `retry`, `abort` | Retry re-enters the failed Hermes worker; approval is unavailable. |
 | `codex_execution_failed` | `retry`, `abort` | Retry grants exactly one additional Codex attempt; approval is unavailable. |
+| `operator_pause` | `continue`, `revise`, `abort` | Continue enters the already-selected next node; revise routes to Codex with guidance. |
 
 `accept_with_failed_validation` and `accept_with_review_findings` require a human message acknowledging the known failures, while `revise` requires nonempty corrective guidance for Codex. Append accepted failure reasons to `overrideReasons`; neither override response can produce ordinary `completed` status. For an exhausted validation, review, or Codex failure, a human retry/revise sets `maxAttempts = attempt + 1`; later exhaustion interrupts again. Retrying a failed Hermes worker does not alter the Codex attempt limit. Human approval must be explicit and reason-appropriate. Keep external side effects in separate nodes because an interrupted node restarts from its beginning when resumed.
 
@@ -650,12 +662,7 @@ Required commands are `run`, `status`, and `resume`. `agent-workflow --help` pri
 ### Run
 
 ```bash
-agent-workflow run \
-  --repo "/absolute/path/to/repository" \
-  --task "Add CSV export for scheduled posts." \
-  --validate "npm run typecheck" \
-  --validate "npm test" \
-  --max-attempts 3
+agent-workflow
 ```
 
 Print the run ID before invoking the first agent:
@@ -664,7 +671,9 @@ Print the run ID before invoking the first agent:
 Run ID: 019abc...
 ```
 
-A new run refuses to reuse an existing ID unless resume is explicit.
+A bare `agent-workflow` starts a new run; `agent-workflow run` remains an explicit alias. A new run resolves the target from `--repo` when supplied and otherwise uses `process.cwd()`. It refuses to reuse an existing ID unless resume is explicit.
+
+When stdin and stdout are terminals, `run` and `resume` render the structured event stream as a local terminal UI by default. A new interactive run prompts for its task when `--task` is omitted; non-interactive runs require the flag instead of waiting for input. `--no-interactive` disables the TUI for explicit structured output, while non-terminal execution stays structured automatically. `p` requests an `operator_pause` after the current graph node, `t` toggles redacted raw output, and the pause accepts continue, corrective guidance, or abort without leaving the process. This is a presentation and control layer over the same graph and checkpointer, not a second workflow runtime.
 
 ### Status
 
@@ -712,9 +721,9 @@ Prefer CLI options. The only repository configuration file in version one is an 
 }
 ```
 
-Repeated `--validate` flags replace the JSON validation list. Other CLI flags override matching JSON values. Reject an untracked, symlinked, malformed, or out-of-root configuration file. Do not discover validation commands or build a configuration framework.
+Repeated `--validate` flags replace the JSON validation list. A non-empty JSON validation list overrides automatic tracked-`AGENTS.md` selection. Other CLI flags override matching JSON values. Reject an untracked, symlinked, malformed, or out-of-root configuration file. Do not discover package scripts or build a configuration framework.
 
-The workflow installation may contain a Git-ignored project-root `.env` with `HERMES_PATH` and `CODEX_PATH`. The CLI loads it through Node's built-in `process.loadEnvFile()` before parsing commands; already exported variables take precedence, and missing values fall back to `hermes` and `codex` on `PATH`. [`.env.example`](../.env.example) documents the two supported variables. Target-repository environment files are never loaded.
+The workflow installation may contain a Git-ignored project-root `.env` with `HERMES_PATH` and `CODEX_PATH`. The Bun shebang disables automatic `.env` loading, and the CLI explicitly parses only this installation file before running a command; already exported variables take precedence, and missing values fall back to `hermes` and `codex` on `PATH`. [`.env.example`](../.env.example) documents the two supported variables. Target-repository environment files are never loaded.
 
 ## Hermes integration and memory policy
 
@@ -734,7 +743,7 @@ The workflow is not a hardened credential-isolation boundary. It disables Codex 
 
 It may not intentionally deploy, push, merge, open pull requests, modify files outside the selected repository and user-level runtime-data directory, run destructive database commands, install global packages, increase retry limits automatically, disable Codex's sandbox, or execute unreviewed model-generated commands.
 
-Resolve repository paths, require an existing Git worktree, and reject nonexistent paths. Execute validation only from caller-supplied `--validate` values or the checked-in root `.agent-workflow.json`; planner suggestions are never executable input. Do not log tokens, API keys, full environments, sensitive memory, or credentials found in command output.
+Resolve repository paths, require an existing Git worktree, and reject nonexistent paths. Execute validation only from caller-supplied `--validate` values, the checked-in root `.agent-workflow.json`, or planner selections that exactly match eligible commands in checked-in root `AGENTS.md`. Do not log tokens, API keys, full environments, sensitive memory, or credentials found in command output.
 
 Hermes planner, research, and reviewer no-write behavior is a role contract in the MVP, not an OS-enforced sandbox: scripted Hermes runs use the invoking user's normal tools, skills, and permissions. Keep prompts explicit and fingerprint Git-visible state before and after each Hermes call. A detected persistent Git-visible mutation fails the run immediately and exposes the diff; it has no resume action. Ignored-file writes and external side effects are outside this check. Add OS-level isolation only if this limitation proves unacceptable in real use.
 
@@ -771,7 +780,7 @@ Human interrupt: no automatic timeout
 
 ## Logging
 
-Write structured JSON events to stderr through one small logging helper. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. An opt-in `--verbose` flag on `run` and `resume` also records each redacted worker command, emitted output, ten-second heartbeat, and completion. Hermes one-shot mode exposes only its final response, so the workflow cannot stream Hermes-internal tool calls. Redact likely secrets from captured output before writing logs or checkpoints.
+Write structured JSON events through one small logging helper. Without a TUI they go to stderr; the TUI consumes the same objects in process. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. `--verbose` adds redacted worker command metadata, ten-second heartbeats, and completion, while `--trace` also includes redacted stdout and stderr. Hermes one-shot mode exposes only its final response, so the workflow cannot stream Hermes-internal tool calls. Redact likely secrets from captured output before writing logs or checkpoints.
 
 The first version does not require LangSmith.
 
@@ -779,7 +788,7 @@ The first version does not require LangSmith.
 
 ### Unit tests
 
-Test pure routing functions for research decisions, deterministic review escalation, Codex exit handling, validation retry and exhaustion, optional review, all three review decisions, every interrupt reason, worker retry targets, boundary violations, and the `completed_with_override` outcome.
+Test pure routing functions for research decisions, deterministic review escalation, Codex exit handling, validation retry, environment pause, and exhaustion, optional review, all three review decisions, every interrupt reason, worker retry targets, boundary violations, and the `completed_with_override` outcome.
 
 ### Command-wrapper tests
 
@@ -787,7 +796,7 @@ Mock subprocess execution and cover successful and failed Hermes/Codex calls, us
 
 ### Graph tests
 
-Compile with fake workers and verify node order, worker-error routing, attempt increments, checkpoint persistence, interrupt behavior, correct resume routing, and that completed nodes are not unnecessarily rerun. Verify status reports pending positions, checkpoint count, and latest checkpoint ID without treating scheduled nodes as completed. Verify a second `run` or `resume` fails while the global lock is held, a leased repository rejects another run after pause, a mismatched pause fingerprint refuses resume, and terminal or unexpected caught outcomes remove the lease.
+Compile with fake workers and verify node order, worker-error routing, attempt increments, checkpoint persistence, interrupt behavior, operator guidance, environment-failure retry, correct resume routing, and that completed nodes are not unnecessarily rerun. Verify status reports pending positions, checkpoint count, and latest checkpoint ID without treating scheduled nodes as completed. Verify a second `run` or `resume` fails while the global lock is held, a leased repository rejects another run after pause, a mismatched pause fingerprint refuses resume, and terminal or unexpected caught outcomes remove the lease.
 
 ### Manual integration test
 
@@ -797,13 +806,13 @@ Use a disposable Git repository with this task:
 Add a function that returns the sum of two integers and add tests.
 ```
 
-Validate with `npm test`. Confirm a dirty or detached-HEAD repository is refused, runtime files stay outside the target repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, HEAD and branch remain fixed, validation executes, review runs only when required, pause creates a lease and fingerprint, state persists, status is inspectable, and an unchanged repository resumes.
+Validate with `bun run test`. Confirm a dirty or detached-HEAD repository is refused, runtime files stay outside the target repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, HEAD and branch remain fixed, validation executes, review runs only when required, pause creates a lease and fingerprint, state persists through Bun-native SQLite, status is inspectable, and an unchanged repository resumes.
 
 ## Implementation phases
 
 ### Phase 1: Command wrappers — implemented
 
-`runHermes()`, `runCodex()`, and `runValidationCommand()` use `node:child_process` with timeouts, bounded captured output, structured errors, clean-worktree and named-branch preflight, Git-visible fingerprinting, Git invariant checks, and explicit Codex network/search overrides. Startup feature-detects the required real CLI flags, while automated tests use controlled fakes.
+`runHermes()`, `runCodex()`, and `runValidationCommand()` use Bun's Node-compatible `node:child_process` implementation with timeouts, bounded captured output, structured errors, clean-worktree and named-branch preflight, Git-visible fingerprinting, Git invariant checks, and explicit Codex network/search overrides. Startup feature-detects the required real CLI flags, while automated tests use controlled fakes.
 
 ### Phase 2: Minimal graph — implemented
 
@@ -825,6 +834,10 @@ Planner decisions, deterministic review-risk escalation, research, review, and r
 
 The repository-local `agent-workflow` skill decides when the workflow is appropriate, starts it, reports the run ID, checks status before restarting, and preserves exact repository scope. It does not generate graphs or manage state manually.
 
+### Phase 7: Compact output and terminal steering — implemented
+
+Validation preserves the selected runtime, environment failures pause before another coding attempt, and model prompts receive bounded diagnostics. The dependency-free TUI renders the shared event stream and requests checkpointed pauses only at safe graph-node boundaries.
+
 ## Initial acceptance criteria
 
 The first usable release satisfies these criteria:
@@ -834,7 +847,7 @@ The first usable release satisfies these criteria:
 - Codex is invoked directly with workspace sandboxing retained.
 - Codex failures route deterministically and never fall through to validation.
 - Validation uses trusted deterministic commands and exit codes.
-- Validation commands come only from repeated caller flags or checked-in root JSON; Hermes output never executes.
+- Validation commands come only from repeated caller flags, checked-in root JSON, or exact eligible matches in checked-in root `AGENTS.md`; undocumented Hermes output never executes.
 - Validation or review feedback loops back to Codex only while attempts remain.
 - Deterministic risk rules can require review even when Hermes does not.
 - SQLite checkpoints every run under a stable ID.
@@ -898,7 +911,7 @@ LangGraph owns the workflow. Hermes supplies reasoning where reasoning is useful
 - [LangGraph JavaScript persistence](https://docs.langchain.com/oss/javascript/langgraph/persistence)
 - [LangGraph JavaScript interrupts](https://docs.langchain.com/oss/javascript/langgraph/interrupts)
 - [LangGraph.js SQLite checkpointer](https://github.com/langchain-ai/langgraphjs/tree/main/libs/checkpoint-sqlite)
-- [Node.js release schedule](https://nodejs.org/en/about/previous-releases)
+- [Bun SQLite](https://bun.com/docs/runtime/sqlite)
 - [Codex CLI reference](https://developers.openai.com/codex/cli/reference)
 - [Codex configuration reference](https://learn.chatgpt.com/codex/config-file/config-reference)
 - [Hermes CLI command reference](https://github.com/nousresearch/hermes-agent/blob/main/website/docs/reference/cli-commands.md)

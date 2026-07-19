@@ -8,9 +8,9 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "types": ["node"],
+    "types": ["bun"],
     "skipLibCheck": true,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "compat/**/*.d.ts"]
 }

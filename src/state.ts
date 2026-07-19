@@ -18,7 +18,9 @@ export const InterruptReasonSchema = z.enum([
   "review_uncertain",
   "review_changes_exhausted",
   "validation_failed_exhausted",
+  "validation_environment_failed",
   "validation_commands_missing",
+  "operator_pause",
   "agent_execution_failed",
   "codex_execution_failed",
 ]);
@@ -51,7 +53,7 @@ export const WorkflowState = new StateSchema({
   implementationSummary: z.string().default(""),
 
   validationCommands: z.array(z.string()).default([]),
-  validationSource: z.enum(["cli", "repo_config"]).optional(),
+  validationSource: z.enum(["cli", "repo_config", "agents"]).optional(),
   validationResults: z.array(CommandResultSchema).default([]),
   validationPassed: z.boolean().optional(),
   validationCoverageComplete: z.boolean().default(false),
@@ -71,7 +73,7 @@ export const WorkflowState = new StateSchema({
   humanResponse: z.string().optional(),
   humanMessage: z.string().optional(),
   overrideReasons: z.array(z.string()).default([]),
-  resumeTarget: z.enum(["planner", "research", "coder", "reviewer"]).optional(),
+  resumeTarget: z.enum(["planner", "research", "coder", "validation", "reviewer"]).optional(),
 
   workerErrorSource: z
     .enum(["planner", "research", "coder", "reviewer"])
@@ -112,7 +114,9 @@ export const allowedResponses: Record<InterruptReason, readonly string[]> = {
     "revise",
     "abort",
   ],
+  validation_environment_failed: ["retry", "abort"],
   validation_commands_missing: ["provide_validation", "abort"],
+  operator_pause: ["continue", "revise", "abort"],
   agent_execution_failed: ["retry", "abort"],
   codex_execution_failed: ["retry", "abort"],
 };

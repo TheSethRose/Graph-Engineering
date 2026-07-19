@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test } from "bun:test";
 import { promisify } from "node:util";
 import { MemorySaver } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
@@ -96,6 +96,7 @@ function plannerOutput(reviewRequired = false) {
 test("Codex and validation failures retry Codex without premature validation", async () => {
   const fixture = await repository();
   let coderCalls = 0;
+  const coderPrompts: string[] = [];
   let validationCalls = 0;
   let reviewerCalls = 0;
   const hermes = (async (_prompt, _repo, _timeout, kind) => {
@@ -110,7 +111,8 @@ test("Codex and validation failures retry Codex without premature validation", a
             : { decision: "approved" as const, findings: "looks good" },
     };
   }) as typeof runHermes;
-  const codex = (async (_prompt, repo) => {
+  const codex = (async (prompt, repo) => {
+    coderPrompts.push(prompt);
     coderCalls += 1;
     await writeFile(join(repo, "sum.ts"), `export const sum = (a: number, b: number) => a + b;\n// attempt ${coderCalls}\n`);
     if (coderCalls === 1) return { result: failed(["codex"]) };
@@ -118,7 +120,9 @@ test("Codex and validation failures retry Codex without premature validation", a
   }) as typeof runCodex;
   const validate = (async () => {
     validationCalls += 1;
-    return validationCalls === 1 ? failed(["npm", "test"]) : ok(["npm", "test"]);
+    return validationCalls === 1
+      ? { ...failed(["npm", "test"]), stderr: `failure-start\n${"x".repeat(20_000)}\nfailure-end` }
+      : ok(["npm", "test"]);
   }) as typeof runValidationCommand;
   try {
     const graph = buildGraph(new MemorySaver(), {
@@ -140,6 +144,151 @@ test("Codex and validation failures retry Codex without premature validation", a
     assert.equal(result.humanReason, undefined);
     assert.equal(result.workerErrorSource, null);
     assert.equal(result.workerError, null);
+    assert.match(coderPrompts[2] ?? "", /characters omitted/);
+    assert.match(coderPrompts[2] ?? "", /failure-end/);
+    assert.ok((coderPrompts[2]?.length ?? Infinity) < 8_000);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("planner selects validation copied from tracked AGENTS.md instructions", async () => {
+  const fixture = await repository();
+  const calls: string[] = [];
+  const hermes = (async (_prompt, _repo, _timeout, kind) => ({
+    result: ok(["hermes"]),
+    output:
+      kind === "planner"
+        ? { ...plannerOutput(), validation_commands: ["bun test", "invented"] }
+        : { decision: "approved" as const, findings: "fine" },
+  })) as typeof runHermes;
+  const codex = (async (_prompt, repo) => {
+    await writeFile(join(repo, "sum.ts"), "export const sum = (a: number, b: number) => a + b;\n");
+    return { result: ok(["codex"]), summary: "implemented" };
+  }) as typeof runCodex;
+  try {
+    const graph = buildGraph(new MemorySaver(), {
+      hermes,
+      codex,
+      trustedValidation: async (_repo, suggestions) =>
+        suggestions.filter((command) => command === "bun test"),
+      validate: async (command) => {
+        calls.push(command);
+        return ok(["/bin/sh", "-c", command]);
+      },
+      dataRoot: join(fixture.root, "data"),
+    });
+    const input = initial(fixture, {
+      validationCommands: [],
+      validationSource: undefined,
+    });
+    await graph.invoke(input, { configurable: { thread_id: input.runId } });
+    const state = (
+      await graph.getState({ configurable: { thread_id: input.runId } })
+    ).values as WorkflowStateValue;
+    assert.equal(state.status, "completed");
+    assert.equal(state.validationSource, "agents");
+    assert.deepEqual(state.validationCommands, ["bun test"]);
+    assert.deepEqual(calls, ["bun test"]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("environment validation failures pause without spending a Codex attempt", async () => {
+  const fixture = await repository();
+  let coderCalls = 0;
+  let validationCalls = 0;
+  const graph = buildGraph(new MemorySaver(), {
+    hermes: (async (_prompt, _repo, _timeout, kind) => ({
+      result: ok(["hermes"]),
+      output:
+        kind === "planner"
+          ? plannerOutput()
+          : kind === "research"
+            ? { findings: "none" }
+            : { decision: "approved" as const, findings: "" },
+    })) as typeof runHermes,
+    codex: (async (_prompt, repo) => {
+      coderCalls += 1;
+      await writeFile(join(repo, "sum.ts"), "export const sum = () => 1;\n");
+      return { result: ok(["codex"]), summary: "changed" };
+    }) as typeof runCodex,
+    validate: (async () => {
+      validationCalls += 1;
+      return validationCalls === 1
+        ? {
+            ...failed(["npm", "test"]),
+            stderr: "better_sqlite3.node was compiled against a different Node.js version; NODE_MODULE_VERSION 137",
+          }
+        : ok(["npm", "test"]);
+    }) as typeof runValidationCommand,
+    dataRoot: join(fixture.root, "data"),
+  });
+  const input = initial(fixture);
+  try {
+    await graph.invoke(input, { configurable: { thread_id: input.runId } });
+    let state = (await graph.getState({ configurable: { thread_id: input.runId } })).values as WorkflowStateValue;
+    assert.equal(state.status, "waiting_for_human");
+    assert.equal(state.humanReason, "validation_environment_failed");
+    assert.equal(state.attempt, 1);
+    assert.equal(coderCalls, 1);
+
+    await graph.invoke(resumeCommand({ response: "retry" }), {
+      configurable: { thread_id: input.runId },
+    });
+    state = (await graph.getState({ configurable: { thread_id: input.runId } })).values as WorkflowStateValue;
+    assert.equal(state.status, "completed");
+    assert.equal(coderCalls, 1);
+    assert.equal(validationCalls, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("operator pause accepts guidance before the next safe graph node", async () => {
+  const fixture = await repository();
+  let pause = true;
+  let coderPrompt = "";
+  const graph = buildGraph(new MemorySaver(), {
+    hermes: (async (_prompt, _repo, _timeout, kind) => ({
+      result: ok(["hermes"]),
+      output:
+        kind === "planner"
+          ? plannerOutput()
+          : kind === "research"
+            ? { findings: "none" }
+            : { decision: "approved" as const, findings: "" },
+    })) as typeof runHermes,
+    codex: (async (prompt, repo) => {
+      coderPrompt = prompt;
+      await writeFile(join(repo, "sum.ts"), "export const sum = () => 1;\n");
+      return { result: ok(["codex"]), summary: "changed" };
+    }) as typeof runCodex,
+    validate: (async () => ok(["npm", "test"])) as typeof runValidationCommand,
+    pauseRequested: () => {
+      const requested = pause;
+      pause = false;
+      return requested;
+    },
+    dataRoot: join(fixture.root, "data"),
+  });
+  const input = initial(fixture);
+  try {
+    await graph.invoke(input, { configurable: { thread_id: input.runId } });
+    let state = (await graph.getState({ configurable: { thread_id: input.runId } })).values as WorkflowStateValue;
+    assert.equal(state.status, "waiting_for_human");
+    assert.equal(state.humanReason, "operator_pause");
+    assert.equal(state.resumeTarget, "coder");
+
+    await graph.invoke(
+      resumeCommand({ response: "revise", message: "Keep GUIDE.md unchanged." }),
+      { configurable: { thread_id: input.runId } },
+    );
+    state = (await graph.getState({ configurable: { thread_id: input.runId } })).values as WorkflowStateValue;
+    assert.equal(state.status, "completed");
+    assert.equal(state.attempt, 1);
+    assert.match(coderPrompt, /Keep GUIDE\.md unchanged/);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -545,8 +694,8 @@ if (args[0] === "--help") {
   try {
     const started = await exec(
       process.execPath,
-      [cli, "run", "--repo", fixture.repo, "--task", "Add a sum function"],
-      { cwd: process.cwd(), env, maxBuffer: 2 * 1024 * 1024 },
+      [cli, "run", "--task", "Add a sum function"],
+      { cwd: fixture.repo, env, maxBuffer: 2 * 1024 * 1024 },
     );
     const runId = /Run ID: ([^\s]+)/.exec(started.stdout)?.[1];
     assert.ok(runId);

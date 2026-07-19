@@ -22,12 +22,22 @@ export type WorkflowConfig = {
   codexTimeoutMs: number;
   validationTimeoutMs: number;
   validationCommands: string[];
-  validationSource?: "cli" | "repo_config";
+  validationSource?: "cli" | "repo_config" | "agents";
 };
 
 export type ConfigOverrides = Partial<
   Omit<WorkflowConfig, "validationCommands" | "validationSource">
 > & { validationCommands?: string[] };
+
+export function isValidationEnvironmentFailure(result: CommandResult): boolean {
+  const output = `${result.stdout}\n${result.stderr}`;
+  return (
+    result.exitCode === 127 ||
+    /compiled against a different Node\.js version|NODE_MODULE_VERSION\s+\d+|npm warn EBADENGINE\s+Unsupported engine/i.test(
+      output,
+    )
+  );
+}
 
 async function trackedConfig(repo: string): Promise<z.infer<typeof RepoConfigSchema> | undefined> {
   const canonicalRepo = await realpath(repo);
@@ -59,6 +69,90 @@ async function trackedConfig(repo: string): Promise<z.infer<typeof RepoConfigSch
       { cause: error },
     );
   }
+}
+
+const VALIDATION_HEADING = /\b(?:setup|install|build|tests?|testing|validation|validate|checks?|quality)\b/i;
+const NEGATED_COMMAND = /\b(?:do not|don't|never|avoid)\b/i;
+
+function documentedValidationCommands(markdown: string): Set<string> {
+  const commands = new Set<string>();
+  const sectionLevels = new Map<number, boolean>();
+  let relevantSection = false;
+  let inFence = false;
+  let trustedFence = false;
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const fence = line.match(/^\s*```\s*([\w-]*)\s*$/);
+    if (fence) {
+      if (inFence) {
+        inFence = false;
+        trustedFence = false;
+      } else {
+        inFence = true;
+        trustedFence =
+          relevantSection && /^(?:|sh|shell|bash|zsh)$/.test(fence[1]?.toLowerCase() ?? "");
+      }
+      continue;
+    }
+
+    if (inFence) {
+      const command = line.trim();
+      if (trustedFence && command && !command.startsWith("#")) commands.add(command);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1]!.length;
+      for (const existing of [...sectionLevels.keys()]) {
+        if (existing >= level) sectionLevels.delete(existing);
+      }
+      const parentRelevant = [...sectionLevels.values()].some(Boolean);
+      relevantSection = parentRelevant || VALIDATION_HEADING.test(heading[2]!);
+      sectionLevels.set(level, relevantSection);
+      continue;
+    }
+
+    if (!relevantSection || NEGATED_COMMAND.test(line)) continue;
+    for (const match of line.matchAll(/`([^`\n]+)`/g)) {
+      const command = match[1]!.trim();
+      if (command) commands.add(command);
+    }
+  }
+
+  return commands;
+}
+
+export async function trustedAgentValidationCommands(
+  repo: string,
+  suggestions: string[],
+): Promise<string[]> {
+  const canonicalRepo = await realpath(repo);
+  const path = join(canonicalRepo, "AGENTS.md");
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error("AGENTS.md must be a regular, non-symlinked file.");
+    }
+    if ((await realpath(path)) !== path) {
+      throw new Error("AGENTS.md must not resolve through a symlink.");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  const tracked = await runCommand(
+    "git",
+    ["ls-files", "--error-unmatch", "--", "AGENTS.md"],
+    { cwd: canonicalRepo, timeoutMs: 10_000 },
+  );
+  if (tracked.exitCode !== 0) throw new Error("AGENTS.md exists but is not Git-tracked.");
+
+  const documented = documentedValidationCommands(await readFile(path, "utf8"));
+  return [...new Set(suggestions.map((command) => command.trim()))].filter((command) =>
+    documented.has(command),
+  );
 }
 
 export async function loadWorkflowConfig(
@@ -93,10 +187,10 @@ export async function runValidationCommand(
   repo: string,
   timeoutMs: number,
 ): Promise<CommandResult> {
-  return await runCommand("/bin/sh", ["-lc", command], {
+  return await runCommand("/bin/sh", ["-c", command], {
     cwd: repo,
     timeoutMs,
-    recordedArgv: ["/bin/sh", "-lc", command],
+    recordedArgv: ["/bin/sh", "-c", command],
     traceLabel: "validation",
   });
 }

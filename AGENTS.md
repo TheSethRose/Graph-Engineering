@@ -3,24 +3,25 @@
 ## Project
 
 - `agent-workflow` is a synchronous local CLI: LangGraph owns routing and checkpoints, Hermes plans/researches/reviews, Codex edits the selected repository, and trusted commands validate the result.
-- Node.js 24 is the supported runtime. `README.md` documents the user-facing command surface, `docs/PLAN.md` is the execution contract, and `docs/RESEARCH.md` records the technical basis and known limitations; keep them aligned with behavior changes.
+- Bun is the package manager, execution runtime, test runner, SQLite driver, and global-linking tool. `README.md` documents the user-facing command surface, `docs/PLAN.md` is the execution contract, and `docs/RESEARCH.md` records the technical basis and known limitations; keep them aligned with behavior changes.
 - Version one is intentionally single-process and macOS/Unix-only. Do not add servers, queues, parallel writers, dynamic graphs, or Windows support without an explicit scope change.
 
 ## Setup and Validation
 
-- Select the pinned runtime and install the lockfile exactly: `nvm use && npm ci`.
-- Build and type-check: `npm run build`.
-- Run standalone type-checking: `npm run typecheck`.
-- Run linting: `npm run lint`.
-- Run the configured tooling and supply-chain scan: `npm run doctor`. Read its diagnostics; a zero exit alone does not mean every check applied.
-- Ensure all issues found by typecheck, linting, or `npm run doctor` are resolved.
-- Run the full gate after source or test changes: `npm test`. It rebuilds before running all compiled `node:test` files.
-- Run one focused file while iterating, for example: `npm run build && node --test dist/tests/routing.test.js`.
-- Build before exercising the unlinked CLI with `npm run agent-workflow -- <command>`. `npm link` is optional for the global `agent-workflow` command described in the README.
+- Install the Bun lockfile exactly: `bun install --frozen-lockfile`.
+- Build and type-check: `bun run build`.
+- Run standalone type-checking: `bun run typecheck`.
+- Run linting: `bun run lint`.
+- Run the configured tooling and supply-chain scan: `bun run doctor`. Read its diagnostics; a zero exit alone does not mean every check applied.
+- Ensure all issues found by typecheck, linting, or `bun run doctor` are resolved.
+- Run the full gate after source or test changes: `bun run test`. It rebuilds before running all compiled `bun:test` files.
+- Run one focused file while iterating, for example: `bun run build && bun test ./dist/tests/routing.test.js`.
+- Build before exercising the unlinked CLI with `bun run agent-workflow -- <command>`. `bun link` is optional for the global `agent-workflow` command described in the README.
 
 ## Code and Architecture
 
-- Use strict ESM TypeScript and include `.js` extensions in relative imports. Prefer Node's standard library, `node:test`, and `node:assert/strict`; do not add a CLI framework, ORM, subprocess wrapper, test framework, broad `langchain` package, or another abstraction without a concrete gap.
+- Use strict ESM TypeScript and include `.js` extensions in relative imports. Prefer Bun's runtime and SQLite APIs, Bun's Node-compatible standard library, `bun:test`, and `node:assert/strict`; do not add a CLI framework, ORM, subprocess wrapper, test framework, broad `langchain` package, or another abstraction without a concrete gap.
+- Keep `compat/better-sqlite3` limited to the API differences required by the official LangGraph `SqliteSaver`; checkpoint semantics remain owned by LangGraph rather than a local saver fork.
 - Keep state and external input Zod-validated. Checkpoint only schema-backed primitives and plain objects, never credentials, full environments, exceptions, handles, or database connections.
 - Keep routing decisions pure in `src/routing.ts`, state contracts in `src/state.ts`, subprocess and agent boundaries in `src/agents.ts`, Git/checkpoint/lease behavior in `src/checkpoint.ts`, trusted validation loading in `src/validation.ts`, and graph nodes and edges in `src/graph.ts`.
 - LangGraph checkpoints are authoritative for execution position. Do not duplicate graph state, let model output select arbitrary nodes, suppress deterministic review escalation, or extend retry limits automatically.
@@ -29,8 +30,8 @@
 ## Safety and Repository Boundaries
 
 - Hermes planner, researcher, and reviewer roles are read-only. Codex is the only coding worker and is invoked directly by LangGraph, never through Hermes.
-- Execute validation only from caller-supplied `--validate` values or a checked-in root `.agent-workflow.json`; Hermes suggestions are advisory and must never become shell input.
+- Execute validation only from caller-supplied `--validate` values, a checked-in root `.agent-workflow.json`, or planner selections that exactly match commands in validation-related sections of a checked-in root `AGENTS.md`. Never execute undocumented model output.
 - Preserve the clean-worktree, named-branch, and immutable HEAD/branch invariants. Workflow code must never commit, push, deploy, reset, clean, switch branches, merge, or open pull requests in a target repository.
 - Keep checkpoints, locks, and leases under the XDG-aware user data root, outside this repository and every target repository. Preserve paused-run leases and fingerprints rather than attempting automatic recovery.
 - `.env` may contain only local executable paths documented by `.env.example`; never commit it or log credentials, tokens, full environments, or sensitive command output.
-- Do not edit `dist/`; it is generated by `npm run build`. Update `package-lock.json` with `package.json`, and treat `.agents/skills/agent-workflow/SKILL.md` as the only repository-owned skill under `.agents/`.
+- Do not edit `dist/`; it is generated by `bun run build`. Update `bun.lock` with `package.json`, and treat `.agents/skills/agent-workflow/SKILL.md` as the only repository-owned skill under `.agents/`.

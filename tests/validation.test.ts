@@ -3,13 +3,18 @@ import { execFile } from "node:child_process";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test } from "bun:test";
 import { promisify } from "node:util";
 import {
   assertGitInvariants,
   preflightRepository,
 } from "../src/checkpoint.js";
-import { loadWorkflowConfig, runValidationCommand } from "../src/validation.js";
+import {
+  isValidationEnvironmentFailure,
+  loadWorkflowConfig,
+  runValidationCommand,
+  trustedAgentValidationCommands,
+} from "../src/validation.js";
 
 const exec = promisify(execFile);
 
@@ -95,9 +100,56 @@ test("tracked JSON configuration is validated and CLI commands replace it", asyn
   }
 });
 
-test("validation executes trusted shell commands and preserves the exit contract", async () => {
+test("planner validation is trusted only when copied from tracked AGENTS.md command sections", async () => {
   const repo = await repository();
   try {
+    await writeFile(
+      join(repo, "AGENTS.md"),
+      `# Instructions
+
+## Setup and Validation
+
+- Run the focused checks with \`bun run typecheck\` and \`bun test\`.
+- Never run \`rm -rf generated\`.
+
+\`\`\`sh
+bun run lint
+# explanatory comment
+\`\`\`
+
+## Safety
+
+- Never run \`git reset --hard\`.
+`,
+    );
+    await assert.rejects(
+      trustedAgentValidationCommands(repo, ["bun test"]),
+      /not Git-tracked/,
+    );
+    await exec("git", ["add", "AGENTS.md"], { cwd: repo });
+    await exec("git", ["commit", "-m", "instructions"], { cwd: repo });
+
+    assert.deepEqual(
+      await trustedAgentValidationCommands(repo, [
+        " bun test ",
+        "bun run lint",
+        "rm -rf generated",
+        "git reset --hard",
+        "bun run undocumented",
+        "bun test",
+      ]),
+      ["bun test", "bun run lint"],
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("validation executes trusted shell commands and preserves the exit contract", async () => {
+  const repo = await repository();
+  const originalPath = process.env.PATH;
+  try {
+    process.env.PATH = `/tmp/agent-workflow-node-24:${originalPath ?? ""}`;
     const passed = await runValidationCommand(
       "test -f tracked.txt && printf shell-ok",
       repo,
@@ -107,13 +159,27 @@ test("validation executes trusted shell commands and preserves the exit contract
     assert.equal(passed.stdout, "shell-ok");
     assert.deepEqual(passed.argv, [
       "/bin/sh",
-      "-lc",
+      "-c",
       "test -f tracked.txt && printf shell-ok",
     ]);
 
     const failed = await runValidationCommand("exit 9", repo, 2_000);
     assert.equal(failed.exitCode, 9);
+
+    const inherited = await runValidationCommand("printf %s \"$PATH\"", repo, 2_000);
+    assert.equal(inherited.stdout, process.env.PATH);
+
+    assert.equal(
+      isValidationEnvironmentFailure({
+        ...failed,
+        stderr: "better_sqlite3.node was compiled against a different Node.js version; NODE_MODULE_VERSION 137",
+      }),
+      true,
+    );
+    assert.equal(isValidationEnvironmentFailure(failed), false);
   } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
     await rm(repo, { recursive: true, force: true });
   }
 });

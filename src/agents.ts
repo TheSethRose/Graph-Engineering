@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseEnv } from "node:util";
 import * as z from "zod";
+import { logEvent } from "./events.js";
 import { OUTPUT_LIMIT_BYTES, type CommandResult } from "./state.js";
 
 type RunOptions = {
@@ -14,14 +17,16 @@ type RunOptions = {
   traceLabel?: string;
 };
 
-let commandTracing = false;
+type CommandTracing = false | "summary" | "full";
 
-export function setCommandTracing(enabled: boolean): void {
-  commandTracing = enabled;
+let commandTracing: CommandTracing = false;
+
+export function setCommandTracing(mode: boolean | "summary" | "full"): void {
+  commandTracing = mode === true ? "full" : mode;
 }
 
 function traceCommand(event: string, fields: Record<string, unknown>): void {
-  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), event, ...fields })}\n`);
+  logEvent(event, fields);
 }
 
 function capped(text: string, maxBytes: number): string {
@@ -40,7 +45,10 @@ export function loadAgentEnvironment(
   path = fileURLToPath(new URL("../../.env", import.meta.url)),
 ): void {
   try {
-    process.loadEnvFile(path);
+    const values = parseEnv(readFileSync(path, "utf8"));
+    for (const [name, value] of Object.entries(values)) {
+      if (process.env[name] === undefined) process.env[name] = value;
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -68,11 +76,11 @@ export async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
-    const tracing = commandTracing && options.traceLabel !== undefined;
+    const tracing = commandTracing !== false && options.traceLabel !== undefined;
     let tracedStdout = "";
     let tracedStderr = "";
     const traceLines = (stream: "stdout" | "stderr", chunk: string): void => {
-      if (!tracing) return;
+      if (!tracing || commandTracing !== "full") return;
       const pending = (stream === "stdout" ? tracedStdout : tracedStderr) + chunk;
       const lines = pending.split(/\r?\n/);
       const remainder = lines.pop() ?? "";

@@ -10,13 +10,12 @@ From this repository:
 
 ```bash
 cd /Users/sethrose/Developer/experiments/graph-engineering
-nvm use
-npm ci
-npm run build
-npm link
+bun install --frozen-lockfile
+bun run build
+bun link
 ```
 
-You need Node.js 24 and signed-in `hermes` and `codex` commands. If either command is not on your `PATH`, copy `.env.example` to `.env` and replace the example values with absolute paths:
+You need Bun and signed-in `hermes` and `codex` commands. If either agent command is not on your `PATH`, copy `.env.example` to `.env` and replace the example values with absolute paths:
 
 ```dotenv
 HERMES_PATH=/absolute/path/to/hermes
@@ -29,7 +28,7 @@ Confirm that the command is available:
 agent-workflow --help
 ```
 
-It will print every command, option, and resume response. If you skipped `npm link`, run every example from this repository and replace `agent-workflow` with `npm run agent-workflow --`.
+It will print every command, option, and resume response. If you skipped `bun link`, run every example from this repository and replace `agent-workflow` with `bun run agent-workflow --`.
 
 ## Prepare the repository you want to change
 
@@ -43,24 +42,22 @@ git status --short
 
 The first command should print a branch name. The second command should print nothing. Commit or stash your work before continuing.
 
-Choose at least one validation command that fits the task. Use commands the repository already trusts, such as its type check, tests, or linter. Run them yourself once if you are not sure they work.
+Keep the repository's root `AGENTS.md` current, especially its setup, build, test, validation, or check sections. The planner selects applicable commands from those instructions and the workflow accepts only exact documented matches.
 
 ## Start a run
 
-You can start the workflow from any directory because `--repo` names the target:
+Change into the clean repository you want to modify, then run the workflow. The current directory is the target and a terminal opens the TUI automatically:
 
 ```bash
-agent-workflow run \
-  --repo "/absolute/path/to/your/repository" \
-  --task "Add CSV export for scheduled posts." \
-  --validate "npm run typecheck" \
-  --validate "npm test" \
-  --verbose
+cd /absolute/path/to/your/repository
+agent-workflow
 ```
 
-Write the task as a clear result. Include important limits, such as files that must stay unchanged or an API shape that must remain compatible.
+Use `--repo "/another/repository"` only when you intentionally want to target a directory other than the one you are in.
 
-Each `--validate` value is one shell command. The workflow runs them in order from the target repository. These commands execute with your user permissions, so only pass commands you trust.
+The TUI asks for the task before starting the workflow. Write it as a clear result and include important limits, such as files that must stay unchanged or an API shape that must remain compatible. `--task "..."` skips the prompt when the task is already written and is required with `--no-interactive`. The coding worker is always told to follow applicable `AGENTS.md` files and update them when the completed behavior makes their instructions stale.
+
+Validation runs in order from the target repository with your user permissions. Repeated `--validate` flags remain available when you intentionally need to override both `AGENTS.md` selection and repository configuration.
 
 The command prints a run ID before work begins:
 
@@ -68,7 +65,9 @@ The command prints a run ID before work begins:
 Run ID: 019abc...
 ```
 
-Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working. `--verbose` shows each redacted worker command, output as the process emits it, a heartbeat every ten seconds, and completion details. Hermes one-shot mode returns only its final response, so heartbeats confirm it is alive but cannot reveal its internal tool calls. Ctrl-C terminates the active worker process group and releases the repository lease without discarding partial edits.
+Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working. In the TUI, press `p` to pause after the current graph node. At that safe boundary, press `c` to continue, `g` to type guidance for a new Codex pass, or `a` to abort. Press `t` while running to toggle the redacted raw trace. Hermes one-shot mode returns only its final response, so the TUI can show heartbeats but not Hermes-internal tool calls. Ctrl-C terminates the active worker process group and releases the repository lease without discarding partial edits.
+
+For machine-readable output, use `--no-interactive`; redirected or piped execution also stays structured automatically. `--verbose` adds redacted commands, heartbeats, and completion events to the normal event stream, while `--trace` also includes redacted worker stdout and stderr.
 
 ## Read the result
 
@@ -104,7 +103,8 @@ The available responses depend on why the run paused:
 | Review needs your decision | `approve`, `revise`, `abort` |
 | Review changes used all attempts | `accept_with_review_findings`, `revise`, `abort` |
 | Validation used all attempts | `accept_with_failed_validation`, `revise`, `abort` |
-| No validation command was given | `provide_validation`, `abort` |
+| Validation hit a Node ABI or engine mismatch | `retry`, `abort` |
+| No applicable validation command was documented | `provide_validation`, `abort` |
 | Hermes or Codex failed to run | `retry`, `abort` |
 
 To provide missing validation commands:
@@ -154,7 +154,7 @@ If a repository uses the same settings for most runs, add a tracked `.agent-work
 }
 ```
 
-The file must be committed before the workflow will use it because a new run requires a clean worktree. Commands passed with `--validate` replace the file's validation list for that run.
+The file must be committed before the workflow will use it because a new run requires a clean worktree. Its validation list overrides automatic `AGENTS.md` selection, and commands passed with `--validate` replace the file's validation list for that run.
 
 Useful command-line options include:
 
@@ -171,6 +171,8 @@ Useful command-line options include:
 
 **A paused run will not resume:** Run `status`, confirm that your response is allowed, and make sure nobody changed the target repository after it paused.
 
-**The workflow says validation is missing:** Resume with `provide_validation` and at least one trusted `--validate` command.
+**The workflow says validation is missing:** Add commands to a validation-related section of root `AGENTS.md` before the next run, or resume this run with `provide_validation` and at least one trusted `--validate` command.
+
+**Validation reports a runtime mismatch:** Fix the target repository's runtime or dependency installation, then resume with `retry`. This pause does not spend a Codex attempt.
 
 **The CLI cannot find Hermes or Codex:** Sign in to both tools, then put them on `PATH` or set their absolute paths in this project's `.env`.
