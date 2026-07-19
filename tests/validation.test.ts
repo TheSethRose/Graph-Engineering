@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
 import { promisify } from "node:util";
 import {
   assertGitInvariants,
+  createLease,
+  createWorkflowWorkspace,
+  discardWorkflowWorkspace,
+  getLease,
   preflightRepository,
+  reconcileWorkflowWorkspace,
+  workspaceChangedFiles,
 } from "../src/checkpoint.js";
 import {
   isValidationEnvironmentFailure,
@@ -29,7 +35,7 @@ async function repository(): Promise<string> {
   return repo;
 }
 
-test("repository preflight accepts only a clean named-branch root", async () => {
+test("repository preflight accepts dirty named-branch roots", async () => {
   const repo = await repository();
   try {
     const baseline = await preflightRepository(repo);
@@ -37,13 +43,111 @@ test("repository preflight accepts only a clean named-branch root", async () => 
     assert.equal(baseline.repo, await realpath(repo));
 
     await writeFile(join(repo, "dirty.txt"), "dirty\n");
-    await assert.rejects(preflightRepository(repo), /worktree is dirty/);
+    assert.equal((await preflightRepository(repo)).branch, "main");
     await rm(join(repo, "dirty.txt"));
 
     await exec("git", ["checkout", "--detach"], { cwd: repo });
     await assert.rejects(preflightRepository(repo), /symbolic-ref|detached/i);
   } finally {
     await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("isolated workspaces preserve dirty source changes and apply only the workflow delta", async () => {
+  const repo = await repository();
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-workspace-"));
+  const dataRoot = join(root, "data");
+  let workspace: Awaited<ReturnType<typeof createWorkflowWorkspace>> | undefined;
+  try {
+    await writeFile(join(repo, "tracked.txt"), "user baseline\n");
+    await writeFile(join(repo, "untracked.txt"), "user file\n");
+    workspace = await createWorkflowWorkspace(await preflightRepository(repo), "workspace-test", dataRoot);
+
+    assert.equal(await readFile(join(workspace.repo, "tracked.txt"), "utf8"), "user baseline\n");
+    assert.equal(await readFile(join(workspace.repo, "untracked.txt"), "utf8"), "user file\n");
+    assert.deepEqual(await workspaceChangedFiles(workspace.repo, workspace.indexPath), []);
+
+    await writeFile(join(workspace.repo, "tracked.txt"), "workflow result\n");
+    await writeFile(join(workspace.repo, "added.txt"), "added by workflow\n");
+    assert.deepEqual(
+      await workspaceChangedFiles(workspace.repo, workspace.indexPath),
+      ["added.txt", "tracked.txt"],
+    );
+    assert.equal(await readFile(join(repo, "tracked.txt"), "utf8"), "user baseline\n");
+
+    const applied = await reconcileWorkflowWorkspace(repo, workspace.repo, workspace.indexPath);
+    assert.deepEqual(applied, ["added.txt", "tracked.txt"]);
+    assert.equal(await readFile(join(repo, "tracked.txt"), "utf8"), "workflow result\n");
+    assert.equal(await readFile(join(repo, "untracked.txt"), "utf8"), "user file\n");
+    assert.equal(await readFile(join(repo, "added.txt"), "utf8"), "added by workflow\n");
+    await assert.rejects(access(workspace.repo));
+    workspace = undefined;
+  } finally {
+    if (workspace) {
+      await discardWorkflowWorkspace(repo, workspace.repo, workspace.indexPath).catch(() => undefined);
+    }
+    await rm(repo, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace reconciliation preserves the workspace when source edits conflict", async () => {
+  const repo = await repository();
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-conflict-"));
+  const dataRoot = join(root, "data");
+  const workspace = await createWorkflowWorkspace(
+    await preflightRepository(repo),
+    "conflict-test",
+    dataRoot,
+  );
+  try {
+    await writeFile(join(workspace.repo, "tracked.txt"), "workflow edit\n");
+    await writeFile(join(repo, "tracked.txt"), "outside edit\n");
+    await assert.rejects(
+      reconcileWorkflowWorkspace(repo, workspace.repo, workspace.indexPath),
+      /workspace preserved/,
+    );
+    await access(workspace.repo);
+    assert.equal(await readFile(join(repo, "tracked.txt"), "utf8"), "outside edit\n");
+  } finally {
+    await discardWorkflowWorkspace(repo, workspace.repo, workspace.indexPath).catch(() => undefined);
+    await rm(repo, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("dead running leases are reclaimed but paused leases remain protected", async () => {
+  const repo = await repository();
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-lease-"));
+  const dataRoot = join(root, "data");
+  try {
+    await mkdir(dataRoot, { recursive: true });
+    await writeFile(
+      join(dataRoot, "active-runs.json"),
+      JSON.stringify({
+        [await realpath(repo)]: {
+          run_id: "dead-run",
+          status: "running",
+          pid: 2_147_483_647,
+        },
+      }),
+    );
+    assert.equal(await createLease(await realpath(repo), "replacement", dataRoot), "dead-run");
+    assert.equal((await getLease(await realpath(repo), dataRoot))?.run_id, "replacement");
+
+    await writeFile(
+      join(dataRoot, "active-runs.json"),
+      JSON.stringify({
+        [await realpath(repo)]: { run_id: "paused-run", status: "waiting_for_human" },
+      }),
+    );
+    await assert.rejects(
+      createLease(await realpath(repo), "other", dataRoot),
+      /already leased by run paused-run/,
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 });
 

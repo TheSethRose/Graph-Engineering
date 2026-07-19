@@ -5,9 +5,12 @@ import {
   changedFiles,
   createCheckpointer,
   createLease,
+  createWorkflowWorkspace,
+  discardWorkflowWorkspace,
   getDataRoot,
   getLease,
   preflightRepository,
+  reconcileWorkflowWorkspace,
   removeLease,
   updateLease,
   withProcessLock,
@@ -25,6 +28,37 @@ import { WorkflowTui } from "./tui.js";
 import { loadWorkflowConfig, type ConfigOverrides } from "./validation.js";
 
 type Parsed = { positionals: string[]; options: Map<string, string[]> };
+type ActiveLease = { repo: string; runId: string; dataRoot: string };
+type ActiveWorkspace = { sourceRepo: string; repo: string; indexPath: string };
+
+let activeLease: ActiveLease | undefined;
+let activeWorkspace: ActiveWorkspace | undefined;
+let activeTui: WorkflowTui | undefined;
+let signalExitStarted = false;
+
+async function releaseActiveLease(): Promise<void> {
+  const lease = activeLease;
+  const workspace = activeWorkspace;
+  activeLease = undefined;
+  activeWorkspace = undefined;
+  if (lease) await removeLease(lease.repo, lease.runId, lease.dataRoot).catch(() => undefined);
+  else if (workspace) {
+    await discardWorkflowWorkspace(
+      workspace.sourceRepo,
+      workspace.repo,
+      workspace.indexPath,
+    ).catch(() => undefined);
+  }
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    if (signalExitStarted) return;
+    signalExitStarted = true;
+    activeTui?.stop();
+    void releaseActiveLease().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  });
+}
 
 const HELP = `Agent Workflow runs a local Hermes, Codex, validation, and review workflow.
 
@@ -163,6 +197,8 @@ function configOverrides(parsed: Parsed): ConfigOverrides {
 }
 
 const configFor = (runId: string) => ({ configurable: { thread_id: runId } });
+const leaseRepo = (state: Pick<WorkflowStateValue, "repo" | "sourceRepo">) =>
+  state.sourceRepo ?? state.repo;
 
 async function finishInvocation(
   state: WorkflowStateValue,
@@ -170,10 +206,15 @@ async function finishInvocation(
   checkpointId?: string,
   printResult = true,
 ): Promise<void> {
+  const repo = leaseRepo(state);
   if (state.status === "waiting_for_human") {
-    await updateLease(state.repo, state.runId, "waiting_for_human", dataRoot);
+    await updateLease(repo, state.runId, "waiting_for_human", dataRoot);
+    activeLease = undefined;
+    activeWorkspace = undefined;
   } else if (["completed", "completed_with_override", "failed", "cancelled"].includes(state.status)) {
-    await removeLease(state.repo, state.runId, dataRoot);
+    await removeLease(repo, state.runId, dataRoot);
+    activeLease = undefined;
+    activeWorkspace = undefined;
   }
   if (!printResult) return;
   process.stdout.write(`${JSON.stringify({
@@ -191,6 +232,9 @@ async function finishInvocation(
     workerError: state.workerError,
     remainingConcerns: state.errors,
     stopReason: state.stopReason,
+    sourceRepo: state.sourceRepo ?? state.repo,
+    workspaceRepo: state.sourceRepo ? state.repo : undefined,
+    changesApplied: state.changesApplied,
   }, null, 2)}\n`);
 }
 
@@ -210,12 +254,14 @@ function startInterface(parsed: Parsed): WorkflowTui | undefined {
   );
   setEventSink(tui.handleEvent);
   tui.start();
+  activeTui = tui;
   return tui;
 }
 
 function stopInterface(tui?: WorkflowTui): void {
   setEventSink();
   tui?.stop();
+  if (activeTui === tui) activeTui = undefined;
   setCommandTracing(false);
 }
 
@@ -227,12 +273,38 @@ async function settleInvocation(
 ): Promise<void> {
   while (true) {
     const snapshot = await graph.getState(configFor(runId));
-    const state = snapshot.values as WorkflowStateValue;
+    let state = snapshot.values as WorkflowStateValue;
     const checkpointId = snapshot.config.configurable?.checkpoint_id;
+    if (
+      state.sourceRepo &&
+      state.workspaceIndex &&
+      !state.changesApplied &&
+      ["completed", "completed_with_override"].includes(state.status)
+    ) {
+      try {
+        const files = await reconcileWorkflowWorkspace(
+          state.sourceRepo,
+          state.repo,
+          state.workspaceIndex,
+        );
+        await graph.updateState(configFor(runId), { changedFiles: files, changesApplied: true });
+        activeWorkspace = undefined;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await graph.updateState(configFor(runId), {
+          status: "failed",
+          stopReason: message,
+          errors: [...state.errors, message],
+        });
+      }
+      state = (await graph.getState(configFor(runId))).values as WorkflowStateValue;
+    }
     if (tui && state.status === "waiting_for_human" && state.humanReason === "operator_pause") {
       await finishInvocation(state, dataRoot, checkpointId, false);
       const response = await tui.waitForOperatorResponse();
-      await updateLease(state.repo, runId, "running", dataRoot);
+      const repo = leaseRepo(state);
+      await updateLease(repo, runId, "running", dataRoot);
+      activeLease = { repo, runId, dataRoot };
       logEvent("run_resumed", { runId, response: response.response });
       await graph.invoke(resumeCommand(response), configFor(runId));
       continue;
@@ -271,28 +343,44 @@ async function run(parsed: Parsed): Promise<void> {
       throw new Error("--task is required when interactive task entry is unavailable.");
     }
     await withProcessLock(async () => {
-    const baseline = await preflightRepository(repoInput);
-    const workflowConfig = await loadWorkflowConfig(baseline.repo, configOverrides(parsed));
-    await checkCliCompatibility(baseline.repo);
+    const source = await preflightRepository(repoInput);
+    const workflowConfig = await loadWorkflowConfig(source.repo, configOverrides(parsed));
+    await checkCliCompatibility(source.repo);
     const runId = randomUUID();
-    const checkpointer = await createCheckpointer(dataRoot);
+    const workspace = await createWorkflowWorkspace(source, runId, dataRoot);
+    activeWorkspace = {
+      sourceRepo: source.repo,
+      repo: workspace.repo,
+      indexPath: workspace.indexPath,
+    };
+    const checkpointer = await createCheckpointer(dataRoot).catch(async (error) => {
+      await discardWorkflowWorkspace(source.repo, workspace.repo, workspace.indexPath);
+      activeWorkspace = undefined;
+      throw error;
+    });
     const graph = buildGraph(checkpointer, {
       dataRoot,
       ...(tui ? { pauseRequested: tui.consumePauseRequest } : {}),
     });
     let leaseCreated = false;
     try {
-      await createLease(baseline.repo, runId, dataRoot);
+      const releasedRunId = await createLease(source.repo, runId, dataRoot, workspace.repo);
       leaseCreated = true;
+      activeLease = { repo: source.repo, runId, dataRoot };
       if (!tui) process.stdout.write(`Run ID: ${runId}\n`);
-      logEvent("run_started", { runId, repo: baseline.repo });
+      if (releasedRunId) {
+        logEvent("orphaned_lease_released", { runId: releasedRunId, repo: source.repo });
+      }
+      logEvent("run_started", { runId, repo: source.repo, workspace: workspace.repo });
       await graph.invoke(
         {
           runId,
           task,
-          repo: baseline.repo,
-          baselineHead: baseline.head,
-          baselineBranch: baseline.branch,
+          repo: workspace.repo,
+          sourceRepo: source.repo,
+          workspaceIndex: workspace.indexPath,
+          baselineHead: workspace.head,
+          baselineBranch: workspace.branch,
           validationCommands: workflowConfig.validationCommands,
           ...(workflowConfig.validationSource
             ? { validationSource: workflowConfig.validationSource }
@@ -311,7 +399,16 @@ async function run(parsed: Parsed): Promise<void> {
       await settleInvocation(graph, runId, dataRoot, tui);
     } catch (error) {
       if (leaseCreated) {
-        await removeLease(baseline.repo, runId, dataRoot).catch(() => undefined);
+        await removeLease(source.repo, runId, dataRoot).catch(() => undefined);
+        activeLease = undefined;
+        activeWorkspace = undefined;
+      } else {
+        await discardWorkflowWorkspace(
+          source.repo,
+          workspace.repo,
+          workspace.indexPath,
+        ).catch(() => undefined);
+        activeWorkspace = undefined;
       }
       throw error;
     } finally {
@@ -340,13 +437,16 @@ async function status(parsed: Parsed): Promise<void> {
     }
     const interrupts = snapshot.tasks.flatMap((task) => task.interrupts.map((item) => item.value));
     const checkpointFiles = state.changedFiles ?? [];
-    const repositoryFiles = state.repo ? await changedFiles(state.repo).catch(() => []) : [];
+    const sourceRepo = state.sourceRepo ?? state.repo;
+    const repositoryFiles = sourceRepo ? await changedFiles(sourceRepo).catch(() => []) : [];
     const gitInvariantViolation =
-      state.repo && state.baselineHead && state.baselineBranch
+      state.repo &&
+      state.baselineHead &&
+      ["running", "waiting_for_human"].includes(state.status ?? "")
         ? await assertGitInvariants({
             repo: state.repo,
             head: state.baselineHead,
-            branch: state.baselineBranch,
+            branch: state.baselineBranch ?? "",
           }).catch((error) => (error instanceof Error ? error.message : String(error)))
         : undefined;
     process.stdout.write(`${JSON.stringify({
@@ -362,6 +462,9 @@ async function status(parsed: Parsed): Promise<void> {
       interrupts,
       checkpointChangedFiles: checkpointFiles,
       repositoryChangedFiles: repositoryFiles,
+      sourceRepo,
+      workspaceRepo: state.sourceRepo ? state.repo : undefined,
+      changesApplied: state.changesApplied,
       gitInvariantViolation,
       stopReason: state.stopReason,
     }, null, 2)}\n`);
@@ -419,7 +522,8 @@ async function resume(parsed: Parsed): Promise<void> {
       if (response !== "provide_validation" && validationCommands.length > 0) {
         throw new Error("--validate is allowed only with provide_validation.");
       }
-      const lease = await getLease(state.repo, dataRoot);
+      const repo = leaseRepo(state);
+      const lease = await getLease(repo, dataRoot);
       if (lease?.run_id !== runId) throw new Error("Repository lease does not belong to this run.");
       const invariant = await assertGitInvariants({
         repo: state.repo,
@@ -435,7 +539,8 @@ async function resume(parsed: Parsed): Promise<void> {
       if (fingerprint !== state.pausedWorktreeFingerprint) {
         throw new Error("Repository changed after the interrupt; resume refused and lease retained.");
       }
-      await updateLease(state.repo, runId, "running", dataRoot);
+      await updateLease(repo, runId, "running", dataRoot);
+      activeLease = { repo, runId, dataRoot };
       logEvent("run_resumed", { runId, response });
       try {
         await graph.invoke(
@@ -444,7 +549,8 @@ async function resume(parsed: Parsed): Promise<void> {
         );
         await settleInvocation(graph, runId, dataRoot, tui);
       } catch (error) {
-        await removeLease(state.repo, runId, dataRoot).catch(() => undefined);
+        await removeLease(repo, runId, dataRoot).catch(() => undefined);
+        activeLease = undefined;
         throw error;
       }
     } finally {

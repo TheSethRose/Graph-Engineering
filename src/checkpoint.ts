@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import {
+  chmod,
+  copyFile,
   lstat,
   mkdir,
   open,
@@ -9,6 +11,7 @@ import {
   realpath,
   rename,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -21,6 +24,13 @@ export type GitBaseline = { repo: string; head: string; branch: string };
 export type RepositoryLease = {
   run_id: string;
   status: "running" | "waiting_for_human";
+  pid?: number | undefined;
+  workspace?: string | undefined;
+  updated_at?: string | undefined;
+};
+export type WorkflowWorkspace = GitBaseline & {
+  sourceRepo: string;
+  indexPath: string;
 };
 type Leases = Record<string, RepositoryLease>;
 const LeasesSchema = z.record(
@@ -28,6 +38,9 @@ const LeasesSchema = z.record(
   z.strictObject({
     run_id: z.string().min(1),
     status: z.enum(["running", "waiting_for_human"]),
+    pid: z.number().int().positive().optional(),
+    workspace: z.string().min(1).optional(),
+    updated_at: z.string().optional(),
   }),
 );
 
@@ -64,6 +77,25 @@ async function git(repo: string, args: string[], maxBytes = 32 * 1024 * 1024): P
   return result.stdout;
 }
 
+async function indexedGit(
+  repo: string,
+  indexPath: string,
+  args: string[],
+  maxBytes = 32 * 1024 * 1024,
+): Promise<string> {
+  const result = await runCommand("git", args, {
+    cwd: repo,
+    env: { ...process.env, GIT_INDEX_FILE: indexPath },
+    timeoutMs: 30_000,
+    maxBytes,
+    redactOutput: false,
+  });
+  if (result.exitCode !== 0 || result.timedOut) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+  }
+  return result.stdout;
+}
+
 export async function preflightRepository(path: string): Promise<GitBaseline> {
   const absolute = resolve(path);
   const info = await stat(absolute).catch(() => undefined);
@@ -73,28 +105,141 @@ export async function preflightRepository(path: string): Promise<GitBaseline> {
   if ((await realpath(root)) !== repo) {
     throw new Error("--repo must name the root of an existing Git worktree.");
   }
-  const status = await git(repo, [
-    "status",
-    "--porcelain=v1",
-    "-z",
-    "--untracked-files=all",
-  ]);
-  if (status.length > 0) {
-    throw new Error("Repository worktree is dirty; no workflow changes were made.");
-  }
   const branch = (await git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
   if (!branch) throw new Error("Repository is in detached HEAD state.");
   const head = (await git(repo, ["rev-parse", "HEAD"])).trim();
   return { repo, head, branch };
 }
 
+async function copyUntrackedFile(sourceRepo: string, workspace: string, path: string): Promise<void> {
+  const source = join(sourceRepo, path);
+  const target = join(workspace, path);
+  const info = await lstat(source);
+  await mkdir(dirname(target), { recursive: true });
+  if (info.isSymbolicLink()) {
+    await symlink(await readlink(source), target);
+  } else {
+    await copyFile(source, target);
+    await chmod(target, info.mode);
+  }
+}
+
+export async function createWorkflowWorkspace(
+  source: GitBaseline,
+  runId: string,
+  dataRoot = getDataRoot(),
+): Promise<WorkflowWorkspace> {
+  const root = join(await ensureDataRoot(dataRoot), "workspaces");
+  const repo = join(root, runId);
+  const indexPath = join(root, `${runId}.index`);
+  const sourcePatch = join(root, `${runId}.source.patch`);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await git(source.repo, ["worktree", "add", "--detach", repo, source.head]);
+  try {
+    const patch = await git(source.repo, ["diff", "--binary", "HEAD"]);
+    if (patch) {
+      await writeFile(sourcePatch, patch, { mode: 0o600 });
+      await git(repo, ["apply", "--binary", sourcePatch]);
+    }
+    const untracked = (await git(source.repo, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+    ])).split("\0").filter(Boolean);
+    await Promise.all(untracked.map((path) => copyUntrackedFile(source.repo, repo, path)));
+    const sourceModules = join(source.repo, "node_modules");
+    if ((await stat(sourceModules).catch(() => undefined))?.isDirectory()) {
+      await symlink(sourceModules, join(repo, "node_modules"), "dir").catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+    }
+    await indexedGit(repo, indexPath, ["read-tree", "HEAD"]);
+    await indexedGit(repo, indexPath, ["add", "-A", "--", "."]);
+    await unlink(sourcePatch).catch(() => undefined);
+    return { repo, head: source.head, branch: "", sourceRepo: source.repo, indexPath };
+  } catch (error) {
+    await git(source.repo, ["worktree", "remove", "--force", repo]).catch(() => undefined);
+    await Promise.all([
+      unlink(indexPath).catch(() => undefined),
+      unlink(sourcePatch).catch(() => undefined),
+    ]);
+    throw error;
+  }
+}
+
+async function prepareWorkspaceDiff(repo: string, indexPath: string): Promise<string> {
+  const untracked = (await indexedGit(repo, indexPath, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "-z",
+  ])).split("\0").filter(Boolean);
+  for (let index = 0; index < untracked.length; index += 100) {
+    await indexedGit(repo, indexPath, ["add", "-N", "--", ...untracked.slice(index, index + 100)]);
+  }
+  return await indexedGit(repo, indexPath, ["diff", "--binary", "--no-ext-diff", "--"]);
+}
+
+export async function workspaceChangedFiles(repo: string, indexPath?: string): Promise<string[]> {
+  if (!indexPath) return await changedFiles(repo);
+  await prepareWorkspaceDiff(repo, indexPath);
+  const paths = (await indexedGit(repo, indexPath, ["diff", "--name-only", "-z", "--"]))
+    .split("\0")
+    .filter(Boolean);
+  return [...new Set(paths)].sort();
+}
+
+export async function workspaceReviewDiff(repo: string, indexPath?: string): Promise<string> {
+  if (!indexPath) return await reviewDiff(repo);
+  const value = await prepareWorkspaceDiff(repo, indexPath);
+  const bytes = Buffer.from(value);
+  return bytes.length <= 512 * 1024
+    ? value
+    : `${bytes.subarray(0, 512 * 1024).toString("utf8")}\n[review diff truncated]`;
+}
+
+export async function discardWorkflowWorkspace(
+  sourceRepo: string,
+  repo: string,
+  indexPath: string,
+): Promise<void> {
+  await git(sourceRepo, ["worktree", "remove", "--force", repo]);
+  await unlink(indexPath).catch(() => undefined);
+}
+
+export async function reconcileWorkflowWorkspace(
+  sourceRepo: string,
+  repo: string,
+  indexPath: string,
+): Promise<string[]> {
+  const files = await workspaceChangedFiles(repo, indexPath);
+  const patch = await prepareWorkspaceDiff(repo, indexPath);
+  if (patch) {
+    const patchPath = `${indexPath}.result.patch`;
+    await writeFile(patchPath, patch, { mode: 0o600 });
+    try {
+      await git(sourceRepo, ["apply", "--check", "--binary", patchPath]);
+      await git(sourceRepo, ["apply", "--binary", patchPath]);
+    } catch (error) {
+      throw new Error(
+        `Validated changes could not be applied to the source repository; workspace preserved at ${repo}. ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    } finally {
+      await unlink(patchPath).catch(() => undefined);
+    }
+  }
+  await discardWorkflowWorkspace(sourceRepo, repo, indexPath);
+  return files;
+}
+
 export async function assertGitInvariants(
   baseline: GitBaseline,
 ): Promise<string | undefined> {
   const head = (await git(baseline.repo, ["rev-parse", "HEAD"])).trim();
-  const branch = (
-    await git(baseline.repo, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-  ).trim();
+  const branchName = (await git(baseline.repo, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+  const branch = branchName === "HEAD" ? "" : branchName;
   if (head !== baseline.head || branch !== baseline.branch) {
     return `Git boundary violation: expected ${baseline.branch}@${baseline.head}, found ${branch || "detached HEAD"}@${head}.`;
   }
@@ -251,13 +396,33 @@ export async function createLease(
   repo: string,
   runId: string,
   dataRoot = getDataRoot(),
-): Promise<void> {
+  workspace?: string,
+): Promise<string | undefined> {
   const leases = await readLeases(dataRoot);
-  if (leases[repo]) {
-    throw new Error(`Repository is already leased by run ${leases[repo].run_id}.`);
+  const existing = leases[repo];
+  let releasedRunId: string | undefined;
+  if (existing) {
+    let live = existing.status === "waiting_for_human";
+    if (!live && existing.pid) {
+      try {
+        process.kill(existing.pid, 0);
+        live = true;
+      } catch (error) {
+        live = (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    }
+    if (live) throw new Error(`Repository is already leased by run ${existing.run_id}.`);
+    releasedRunId = existing.run_id;
   }
-  leases[repo] = { run_id: runId, status: "running" };
+  leases[repo] = {
+    run_id: runId,
+    status: "running",
+    pid: process.pid,
+    ...(workspace ? { workspace } : {}),
+    updated_at: new Date().toISOString(),
+  };
   await writeLeases(dataRoot, leases);
+  return releasedRunId;
 }
 
 export async function getLease(
@@ -275,7 +440,14 @@ export async function updateLease(
 ): Promise<void> {
   const leases = await readLeases(dataRoot);
   if (leases[repo]?.run_id !== runId) throw new Error("Repository lease does not belong to this run.");
-  leases[repo] = { run_id: runId, status };
+  const workspace = leases[repo]?.workspace;
+  leases[repo] = {
+    run_id: runId,
+    status,
+    ...(status === "running" ? { pid: process.pid } : {}),
+    ...(workspace ? { workspace } : {}),
+    updated_at: new Date().toISOString(),
+  };
   await writeLeases(dataRoot, leases);
 }
 

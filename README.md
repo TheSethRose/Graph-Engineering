@@ -79,9 +79,9 @@ Bare `agent-workflow` starts a run in the current directory and prompts for the 
 
 The initial version is synchronous, single-process, and local to macOS or Unix. Its optional TUI is only a view and control surface over the same in-process graph; there is no server, web dashboard, queue, plugin system, dynamic graph, or parallel writer. Runtime state lives under `$XDG_DATA_HOME/agent-workflow` or `~/.local/share/agent-workflow`, never in a target repository.
 
-A new run requires a clean worktree on a named branch, records HEAD and the branch, and refuses to continue if either changes. One global process lock prevents concurrent writers, while a persistent repository lease protects paused runs after that lock is released. Resume also requires the repository's Git-visible fingerprint to match the fingerprint saved at the interrupt.
+A new run requires a named branch but may start from a dirty worktree. It seeds the current tracked and non-ignored untracked files into an isolated per-run Git worktree under the user data root, records a private Git index as the run baseline, and executes every worker and validation command there. On successful completion it checks the workflow-only patch against the source repository before applying it; a conflict fails safely and preserves the isolated workspace for inspection.
 
-Git-visible change attribution assumes no editor, terminal, or other automation modifies the target repository while a `run` or `resume` invocation is active. The workflow lock excludes other workflow writers, but reliable attribution against unrelated processes requires future per-run worktree isolation.
+One global process lock prevents concurrent writers, while a persistent repository lease protects active and paused runs after that lock is released. Running leases record their process owner and are reclaimed automatically when that process is dead; paused leases remain protected. Resume fingerprints the isolated workspace, so the source repository may change while a run is paused, with final reconciliation deciding whether the workflow patch still applies cleanly.
 
 Codex retains workspace sandboxing, runs with shell network access and web search explicitly disabled, and is instructed not to perform Git history or branch operations; the workflow enforces that instruction through recorded Git invariants. By default, Hermes selects validation commands by copying them exactly from setup, build, test, validation, or check sections of a checked-in root `AGENTS.md`. The workflow executes only exact matches; repeated caller `--validate` flags or a checked-in root `.agent-workflow.json` remain explicit overrides.
 
@@ -91,14 +91,14 @@ Codex and Hermes failures have explicit graph routes instead of falling through 
 
 Validation inherits the workflow environment through `/bin/sh -c`. High-confidence runtime failures such as a native Node ABI or package-engine mismatch in a target repository pause as `validation_environment_failed` without consuming another Codex attempt. Complete command output remains checkpointed within the normal capture limit, while model retry and review prompts receive a bounded diagnostic excerpt.
 
-Ctrl-C terminates the active worker process group, preserves the last checkpoint and worktree, and releases that run's repository lease. An unexpected exception caught by the CLI has the same preservation and lease cleanup behavior. A hard process crash may leave a stale entry in `<data_root>/active-runs.json`; after confirming no workflow process is alive and manually reconciling the worktree, remove only that repository's entry before starting another run.
+Ctrl-C terminates the active worker process group, preserves the last checkpoint and isolated workspace, and releases that run's repository lease. An unexpected exception caught by the CLI has the same preservation and lease cleanup behavior. A hard process crash may leave a running lease, but the next run reclaims it automatically after confirming that its recorded process is dead; a paused lease is never reclaimed automatically.
 
 ## Prerequisites
 
 - Bun 1.3 or newer
 - An authenticated Hermes CLI
 - An authenticated Codex CLI
-- A clean local Git repository to operate on
+- A local Git repository on a named branch
 
 The workflow uses strict TypeScript with the required `@langchain/core` peer, `@langchain/langgraph`, `@langchain/langgraph-checkpoint-sqlite`, and Zod. Bun provides the runtime, test runner, and native SQLite driver; its Node-compatible standard library provides subprocess, filesystem, and hashing APIs. A small local compatibility package maps the official LangGraph saver's `better-sqlite3` surface to `bun:sqlite`, so checkpoint behavior remains upstream-owned.
 

@@ -32,7 +32,7 @@ It will print every command, option, and resume response. If you skipped `bun li
 
 ## Prepare the repository you want to change
 
-The target must be a Git repository on a named branch with no uncommitted files. Agent Workflow refuses to start from a dirty worktree because it needs to tell your existing work apart from its own changes.
+The target must be a Git repository on a named branch. Uncommitted tracked and non-ignored untracked files are supported: Agent Workflow copies the current source state into an isolated per-run worktree and tracks its own changes against a private baseline.
 
 ```bash
 cd /absolute/path/to/your/repository
@@ -40,7 +40,7 @@ git branch --show-current
 git status --short
 ```
 
-The first command should print a branch name. The second command should print nothing. Commit or stash your work before continuing.
+The first command must print a branch name. The second command is only for your awareness; its output does not block a run.
 
 Keep the repository's root `AGENTS.md` current, especially its setup, build, test, validation, or check sections. The planner selects applicable commands from those instructions and the workflow accepts only exact documented matches.
 
@@ -124,7 +124,7 @@ agent-workflow resume 019abc... \
   --message "The known snapshot failure is unrelated to this change."
 ```
 
-Do not edit the target repository, switch branches, or make a commit while a run is paused. The workflow checks the branch, commit, and files before resuming. If they changed, it will refuse to continue so it does not overwrite or mislabel your work.
+You may keep editing the source repository while a run is paused because execution remains in the isolated workspace printed by `status`. Do not edit that workspace directly. When the run completes, Agent Workflow applies its workflow-only patch to the source only if `git apply --check` succeeds; otherwise it reports the conflict and preserves the workspace.
 
 ## Review the finished work
 
@@ -154,7 +154,7 @@ If a repository uses the same settings for most runs, add a tracked `.agent-work
 }
 ```
 
-The file must be committed before the workflow will use it because a new run requires a clean worktree. Its validation list overrides automatic `AGENTS.md` selection, and commands passed with `--validate` replace the file's validation list for that run.
+The file must be Git-tracked before the workflow will use it. Its validation list overrides automatic `AGENTS.md` selection, and commands passed with `--validate` replace the file's validation list for that run.
 
 Useful command-line options include:
 
@@ -165,11 +165,11 @@ Useful command-line options include:
 
 ## Common problems
 
-**The worktree is not clean:** Commit or stash existing changes, then start a new run.
+**The run preserved an isolated workspace:** Reconciliation failed or the process ended before completion. Run `status RUN_ID` to find the workspace, inspect its workflow-only diff, and resolve or apply it manually.
 
 **The repository is on a detached HEAD:** Check out a named branch before starting.
 
-**A paused run will not resume:** Run `status`, confirm that your response is allowed, and make sure nobody changed the target repository after it paused.
+**A paused run will not resume:** Run `status`, confirm that your response is allowed, and make sure nobody changed the isolated workspace after it paused.
 
 **The workflow says validation is missing:** Add commands to a validation-related section of root `AGENTS.md` before the next run, or resume this run with `provide_validation` and at least one trusted `--validate` command.
 

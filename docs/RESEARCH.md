@@ -49,13 +49,13 @@ Validation commands are a separate trusted-code boundary. Repeated caller `--val
 
 ## State and repository consistency
 
-LangGraph can transactionally checkpoint its own state, but it cannot make a Codex worktree edit atomic with SQLite. Version one therefore requires a clean worktree on a named branch, records HEAD and branch, and attributes later Git-visible changes to the run. That attribution assumes no editor, terminal, or external automation changes the repository during an active invocation; reliable multi-writer attribution requires per-run worktree isolation. A crash after Codex writes files and before the next checkpoint may cause Codex to run again on resume; Codex inspects those partial workflow changes and the orchestrator never resets them.
+LangGraph can transactionally checkpoint its own state, but it cannot make a Codex worktree edit atomic with SQLite. Version one therefore seeds the source repository's current tracked and non-ignored untracked state into an isolated per-run Git worktree, then records that seeded state in a private alternate Git index. Workers can edit the isolated workspace while workflow attribution remains the binary diff against that index. A crash after Codex writes files and before the next checkpoint may cause Codex to run again on resume; Codex inspects those partial workflow changes and the orchestrator never resets them.
 
-This limitation also means status must distinguish checkpoint state from repository state. Pending nodes come directly from `graph.getState()`, while checkpoint count and the latest checkpoint ID describe persisted progress without mislabeling scheduled nodes as completed. Porcelain status against the clean baseline reports Git-visible workflow changes and non-ignored untracked additions. Ignored files are outside attribution. A duplicate `lastCompletedNode` state field would drift and is unnecessary. Dirty-worktree support waits for worktree isolation.
+Status must distinguish checkpoint state, the isolated workspace, and the source repository. Pending nodes come directly from `graph.getState()`, while checkpoint count and the latest checkpoint ID describe persisted progress without mislabeling scheduled nodes as completed. The alternate-index diff reports workflow-only Git-visible changes; ignored files remain outside attribution. On terminal success, `git apply --check` gates applying that patch to the source, and a conflict preserves the workspace instead of overwriting concurrent source changes.
 
-The process lock cannot remain held across an indefinite interrupt. A persistent canonical-repository lease blocks a second run, while a pause-time fingerprint over HEAD, branch, tracked diff, and non-ignored untracked content detects Git-visible changes before resume. A mismatch refuses resume and leaves reconciliation to the user.
+The process lock cannot remain held across an indefinite interrupt. A persistent canonical-source-repository lease blocks a second run, while a pause-time fingerprint over the isolated workspace's HEAD, branch, tracked diff, and non-ignored untracked content detects Git-visible workspace changes before resume. The source may change during a pause because final checked reconciliation owns that conflict decision.
 
-Expected worker failures also need graph data, not exceptions alone. Hermes CLI, timeout, and parsing failures and exhausted Codex failures are stored as structured worker errors and routed to reason-specific interrupts. Unexpected programming errors still throw and retain the last checkpoint and worktree, but the CLI removes the invocation's repository lease before surfacing the error so the repository is not permanently stranded. Hard crashes remain a manual stale-lease recovery case. This keeps operational recovery explicit without swallowing defects.
+Expected worker failures also need graph data, not exceptions alone. Hermes CLI, timeout, and parsing failures and exhausted Codex failures are stored as structured worker errors and routed to reason-specific interrupts. Unexpected programming errors still throw and retain the last checkpoint and workspace, but the CLI removes the invocation's repository lease before surfacing the error. Running leases record their PID and workspace, so a later run reclaims a lease only when that process is dead; paused leases remain protected.
 
 Validation output and repository diffs can be much larger than the actionable evidence. The checkpoint retains bounded command results for inspection, but retry and review prompts receive smaller head-and-tail excerpts of validation and diff content. High-confidence local runtime failures, currently shell command absence, Node native-module ABI mismatch, and package-engine mismatch, route to `validation_environment_failed` without incrementing the Codex attempt because another coding pass cannot repair the invoking environment.
 
@@ -73,13 +73,13 @@ The terminal-default TUI remains inside the synchronous process and is skipped a
 - Represent human acceptance of failed validation as `completed_with_override`, not normal completion.
 - Derive execution position from LangGraph checkpoint metadata instead of duplicating it in state.
 - Retain Codex `workspace-write` sandboxing and never use the bypass flag.
-- Require a clean worktree, immutable HEAD and branch, and derive changed files from porcelain status.
+- Seed dirty source state into an isolated worktree, keep its HEAD immutable, and derive workflow-only changes from a private alternate index.
 - Reject detached HEAD and report only Git-visible changed files, explicitly excluding ignored files from the guarantee.
 - Route expected worker failures explicitly; Codex failures cannot fall through to validation.
 - Define every reachable interrupt reason and store override reasons for accepted validation or review failures.
 - Detect persistent Git-visible Hermes mutations and fail without resume; ignored-file writes and external effects remain outside the check.
 - Hold one atomic filesystem process lock around `run` and `resume` so SQLite and the repository have one writer.
-- Store runtime data outside repositories, persist per-repository leases across pauses, and require a matching pause fingerprint on resume.
+- Store runtime data and isolated worktrees outside repositories, reclaim dead running leases, persist paused leases, and require a matching workspace fingerprint on resume.
 - Disable Codex shell network access and web search with strict per-invocation overrides.
 - Keep prompts beside their nodes until their size justifies separate files.
 - Build subprocess wrappers before writing the graph.

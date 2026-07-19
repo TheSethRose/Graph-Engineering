@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "bun:test";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { MemorySaver } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { runCodex, runHermes } from "../src/agents.js";
@@ -692,6 +693,7 @@ if (args[0] === "--help") {
   };
   const cli = join(process.cwd(), "dist", "src", "cli.js");
   try {
+    await writeFile(join(fixture.repo, "existing.txt"), "pre-existing dirty work\n");
     const started = await exec(
       process.execPath,
       [cli, "run", "--task", "Add a sum function"],
@@ -721,28 +723,6 @@ if (args[0] === "--help") {
     assert.equal(pausedStatus.completedNodes, undefined);
 
     await writeFile(join(fixture.repo, "external.txt"), "external change\n");
-    await assert.rejects(
-      exec(
-        process.execPath,
-        [
-          cli,
-          "resume",
-          runId,
-          "--response",
-          "provide_validation",
-          "--validate",
-          "test -f sum.ts",
-        ],
-        { cwd: process.cwd(), env },
-      ),
-      /Repository changed after the interrupt/,
-    );
-    const leasesAfterRefusal = JSON.parse(
-      await readFile(join(dataHome, "agent-workflow", "active-runs.json"), "utf8"),
-    ) as Record<string, { run_id: string }>;
-    assert.equal(leasesAfterRefusal[fixture.repo]?.run_id, runId);
-    await rm(join(fixture.repo, "external.txt"));
-
     const resumed = await exec(
       process.execPath,
       [
@@ -757,6 +737,8 @@ if (args[0] === "--help") {
       { cwd: process.cwd(), env, maxBuffer: 2 * 1024 * 1024 },
     );
     assert.match(resumed.stdout, /"status": "completed"/);
+    assert.equal(await readFile(join(fixture.repo, "existing.txt"), "utf8"), "pre-existing dirty work\n");
+    assert.equal(await readFile(join(fixture.repo, "external.txt"), "utf8"), "external change\n");
 
     const completed = await exec(process.execPath, [cli, "status", runId], {
       cwd: process.cwd(),
@@ -765,11 +747,18 @@ if (args[0] === "--help") {
     const completedStatus = JSON.parse(completed.stdout) as {
       status: string;
       pendingNodes: string[];
+      checkpointChangedFiles: string[];
       repositoryChangedFiles: string[];
+      changesApplied: boolean;
     };
     assert.equal(completedStatus.status, "completed");
     assert.deepEqual(completedStatus.pendingNodes, []);
-    assert.deepEqual(completedStatus.repositoryChangedFiles, ["sum.ts"]);
+    assert.deepEqual(completedStatus.checkpointChangedFiles, ["sum.ts"]);
+    assert.deepEqual(
+      completedStatus.repositoryChangedFiles,
+      ["existing.txt", "external.txt", "sum.ts"],
+    );
+    assert.equal(completedStatus.changesApplied, true);
     assert.deepEqual(
       JSON.parse(await readFile(join(dataHome, "agent-workflow", "active-runs.json"), "utf8")),
       {},
@@ -824,7 +813,8 @@ if (process.argv.includes("--help")) {
 } else {
   const fs = await import("node:fs/promises");
   const path = await import("node:path");
-  await fs.rm(path.join(process.cwd(), ".git", "HEAD"));
+  const gitFile = await fs.readFile(path.join(process.cwd(), ".git"), "utf8");
+  await fs.rm(path.join(gitFile.trim().slice("gitdir: ".length), "HEAD"));
   process.stdout.write(JSON.stringify({plan:"trigger failure",research_required:false,research_reason:"",review_required:false,review_reason:"",validation_coverage_complete:true,validation_commands:["true"]}));
 }
 `,
@@ -868,6 +858,66 @@ else if (args[0] === "exec" && args[1] === "--help") process.stdout.write("--cd 
       JSON.parse(await readFile(join(dataHome, "agent-workflow", "active-runs.json"), "utf8")),
       {},
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT releases a running lease without deleting its workspace", async () => {
+  const fixture = await repository();
+  const bin = join(fixture.root, "signal-bin");
+  const dataHome = join(fixture.root, "signal-xdg");
+  await mkdir(bin);
+  const hermes = join(bin, "hermes");
+  const codex = join(bin, "codex");
+  await writeFile(
+    hermes,
+    `#!/usr/bin/env node
+if (process.argv.includes("--help")) process.stdout.write("Usage: hermes -z PROMPT");
+else setInterval(() => {}, 1000);
+`,
+  );
+  await writeFile(
+    codex,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--help") process.stdout.write("--ask-for-approval");
+else if (args[0] === "exec" && args[1] === "--help") process.stdout.write("--cd --sandbox --ask-for-approval --strict-config --output-schema --output-last-message");
+`,
+  );
+  await chmod(hermes, 0o755);
+  await chmod(codex, 0o755);
+  const env = {
+    ...process.env,
+    XDG_DATA_HOME: dataHome,
+    HERMES_PATH: hermes,
+    CODEX_PATH: codex,
+  };
+  const cli = join(process.cwd(), "dist", "src", "cli.js");
+  const leasePath = join(dataHome, "agent-workflow", "active-runs.json");
+  try {
+    const child = spawn(
+      process.execPath,
+      [cli, "run", "--repo", fixture.repo, "--task", "Wait for cancellation", "--validate", "true"],
+      { cwd: process.cwd(), env, stdio: "ignore" },
+    );
+    let lease: Record<string, { workspace?: string }> | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      lease = await readFile(leasePath, "utf8")
+        .then((value) => JSON.parse(value) as Record<string, { workspace?: string }>)
+        .catch(() => undefined);
+      if (lease?.[fixture.repo]) break;
+      await delay(50);
+    }
+    const workspace = lease?.[fixture.repo]?.workspace;
+    assert.ok(workspace);
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    child.kill("SIGINT");
+    assert.deepEqual(await exited, { code: 130, signal: null });
+    assert.deepEqual(JSON.parse(await readFile(leasePath, "utf8")), {});
+    await import("node:fs/promises").then(({ access }) => access(workspace));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

@@ -17,9 +17,9 @@ import {
 } from "./agents.js";
 import {
   assertGitInvariants,
-  changedFiles,
   getDataRoot,
-  reviewDiff,
+  workspaceChangedFiles,
+  workspaceReviewDiff,
   worktreeEvidence,
   worktreeFingerprint,
   type GitBaseline,
@@ -286,7 +286,7 @@ export function buildGraph(
     // react-doctor-disable-next-line react-doctor/server-sequential-independent-await
     const violation = await boundaryViolation(state);
     if (violation) return violation;
-    const files = await changedFiles(state.repo);
+    const files = await workspaceChangedFiles(state.repo, state.workspaceIndex);
     if (!call.summary) {
       const retry = withNextAttempt(state);
       const update: WorkflowStateUpdate = {
@@ -354,7 +354,7 @@ export function buildGraph(
   const reviewerNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
     const [fingerprint, diff] = await Promise.all([
       worktreeFingerprint(baseline(state)),
-      reviewDiff(state.repo),
+      workspaceReviewDiff(state.repo, state.workspaceIndex),
     ]);
     const call = await deps.hermes(
       reviewerPrompt(state, diff),
@@ -402,7 +402,7 @@ export function buildGraph(
     const update = {
       status: "waiting_for_human",
       pausedWorktreeFingerprint: await worktreeFingerprint(baseline(state)),
-      changedFiles: await changedFiles(state.repo),
+      changedFiles: await workspaceChangedFiles(state.repo, state.workspaceIndex),
     } as const;
     logEvent("interrupt_created", {
       runId: state.runId,
@@ -531,12 +531,14 @@ export function buildGraph(
     return {
       ...clearRecoveryState(),
       status,
-      changedFiles: await changedFiles(state.repo),
+      changedFiles: await workspaceChangedFiles(state.repo, state.workspaceIndex),
     };
   };
 
   const failedNode = async (state: WorkflowStateValue): Promise<WorkflowStateUpdate> => {
-    const files = await changedFiles(state.repo).catch(() => state.changedFiles);
+    const files = await workspaceChangedFiles(state.repo, state.workspaceIndex).catch(
+      () => state.changedFiles,
+    );
     const reason =
       state.stopReason || state.boundaryEvidence || state.workerError?.stderr || "Workflow failed.";
     logEvent("terminal", { runId: state.runId, status: "failed", reason });

@@ -11,6 +11,7 @@ import { OUTPUT_LIMIT_BYTES, type CommandResult } from "./state.js";
 type RunOptions = {
   cwd: string;
   timeoutMs: number;
+  env?: NodeJS.ProcessEnv;
   recordedArgv?: string[];
   maxBytes?: number;
   redactOutput?: boolean;
@@ -72,7 +73,7 @@ export async function runCommand(
     let spawnError: Error | undefined;
     const child = spawn(executable, args, {
       cwd: options.cwd,
-      env: process.env,
+      env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

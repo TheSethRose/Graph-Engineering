@@ -19,7 +19,7 @@ If the command is not linked, run it from the Agent Workflow repository as `bun 
 
 ## Prepare the target
 
-Confirm the exact repository root is a clean Git worktree on a named branch:
+Confirm the exact repository root is a Git worktree on a named branch:
 
 ```bash
 cd "/absolute/repository/root"
@@ -27,7 +27,7 @@ git branch --show-current
 git status --short
 ```
 
-The branch command must print a name and status must print nothing. Keep the target's root `AGENTS.md` validation instructions current. Hermes may select only exact commands copied from its setup, build, test, validation, or check sections; repeated caller `--validate` values and a committed root `.agent-workflow.json` remain explicit overrides.
+The branch command must print a name. Status may show existing work; the run copies tracked and non-ignored untracked files into an isolated workspace and attributes only changes made after that baseline. Keep the target's root `AGENTS.md` validation instructions current. Hermes may select only exact commands copied from its setup, build, test, validation, or check sections; repeated caller `--validate` values and a Git-tracked root `.agent-workflow.json` remain explicit overrides.
 
 ## Start one run
 
@@ -74,7 +74,7 @@ agent-workflow resume RUN_ID \
   --validate "npm test"
 ```
 
-Do not edit, commit, switch branches, or otherwise change the target while a run is paused. Resume verifies the saved branch, HEAD, repository lease, and worktree fingerprint and refuses changed state.
+The source repository may change while a run is paused because resume verifies the isolated workspace fingerprint. Do not edit the workspace printed by `status`; final reconciliation checks the workflow-only patch against the source and preserves the workspace if it conflicts.
 
 ## Finish
 

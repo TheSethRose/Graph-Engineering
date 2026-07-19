@@ -296,25 +296,21 @@ const dataRoot = join(
 
 The displayed path is the default when `XDG_DATA_HOME` is unset. Create the directory with user-only permissions where the platform supports them.
 
-Version one requires a clean Git worktree. Before creating the run ID or calling an agent:
+Version one requires a Git repository root on a named branch, but the source may contain existing changes. Before calling an agent:
 
 ```text
-git status --porcelain=v1 --untracked-files=all is empty
-  → capture HEAD and active branch, then start
-
-git status --porcelain=v1 --untracked-files=all is not empty
-  → refuse to start without changing anything
-
 active branch resolves to a name
-  → continue
+  → capture source HEAD and branch, create a run ID, then continue
 
 HEAD is detached
   → refuse to start without changing anything
 ```
 
-Record `git rev-parse HEAD` and the named active branch in state. HEAD and branch must remain unchanged through every worker, resume, and terminal node. A mismatch is a boundary violation: stop as `failed`, preserve the worktree, and report the evidence. Never reset, clean, switch branches, or attempt recovery automatically.
+Create an isolated detached Git worktree under `<data_root>/workspaces/<run_id>` at the source HEAD. Apply the source's tracked diff and copy its non-ignored untracked files into that workspace, then populate a private alternate Git index with the seeded state. If the source has `node_modules`, expose it to the workspace through a symlink so ordinary repository validation remains usable without reinstalling dependencies. Workers and validation commands run only in this workspace.
 
-Because the baseline is clean and HEAD is immutable, parse final `git status --porcelain=v1 -z --untracked-files=all` to derive every Git-visible changed file, including non-ignored untracked additions. This attribution assumes no editor, terminal, or external automation changes the repository while `run` or `resume` is active; the workflow lock excludes only other workflow writers. Ignored files are outside version one's change-attribution guarantee. Dirty-worktree and external-writer isolation are deferred until per-run worktree isolation exists.
+Record the workspace HEAD in state and require it to remain unchanged through every worker, resume, and terminal node. A mismatch is a boundary violation: stop as `failed`, preserve the workspace, and report the evidence. Derive workflow-only changed files and review diffs against the private index, including non-ignored untracked additions. Ignored files are outside version one's attribution guarantee. Never reset, clean, switch branches, or attempt recovery automatically.
+
+On `completed` or `completed_with_override`, generate the workflow-only binary patch, run `git apply --check` against the source repository, and apply it only when the check succeeds. Remove the workspace and private index after a successful application. If the source changed incompatibly, mark the run failed, leave the source unchanged by reconciliation, and preserve the workspace and patchable state for manual recovery.
 
 Acquire one advisory process lock at `<data_root>/agent-workflow.lock` around the entire `run` or `resume` operation. Use an atomic `node:fs` exclusive-create operation, record the owner PID, remove the lock in `finally`, and reclaim it only after verifying that the recorded process no longer exists. Hold the lock until execution pauses or terminates. `status` remains read-only and does not need the lock. A second live writer exits clearly; it never waits indefinitely or shares the target repository or SQLite writer.
 
@@ -324,14 +320,17 @@ The process lock is released when an interrupt returns control, so persist a rep
 {
   "/absolute/path/to/repo": {
     "run_id": "019abc",
-    "status": "waiting_for_human"
+    "status": "waiting_for_human",
+    "pid": 12345,
+    "workspace": "/data/root/workspaces/019abc",
+    "updated_at": "2026-07-19T12:00:00.000Z"
   }
 }
 ```
 
-A new run refuses a repository with an existing lease. Create the lease before the first worker call and retain it across pauses and recoverable worker failures. Remove it on terminal completion, failure, or abort, and also when an unexpected exception escapes `graph.invoke()` so a caught application defect cannot strand the repository. Preserve the last checkpoint and worktree in that case. A hard process crash can still leave a stale lease; after confirming no workflow process is alive and manually reconciling the worktree, the operator may remove only the affected canonical repository entry from `active-runs.json`.
+A new run refuses a repository with a paused lease or a running lease whose recorded PID is alive. It automatically replaces a running lease when that PID is absent or dead, logging the reclaimed run ID. Create the lease before the first worker call and retain it across pauses and recoverable worker failures. Remove it on terminal completion, failure, abort, caught unexpected exceptions, `SIGINT`, and `SIGTERM`; preserve the last checkpoint and isolated workspace when execution did not reconcile successfully. A hard crash can leave a running lease, but the next run reclaims it after verifying that its owner is dead. Never auto-reclaim a `waiting_for_human` lease.
 
-Immediately before every interrupt, store `paused_worktree_fingerprint`. Compute a stable SHA-256 over the recorded HEAD and branch, `git diff --binary HEAD`, and sorted path/content hashes for files returned by `git ls-files --others --exclude-standard -z`. This covers persistent Git-visible tracked changes and non-ignored untracked files, but not ignored files or external side effects.
+Immediately before every interrupt, store `paused_worktree_fingerprint`. Compute a stable SHA-256 over the isolated workspace's recorded HEAD and branch, `git diff --binary HEAD`, and sorted path/content hashes for files returned by `git ls-files --others --exclude-standard -z`. This covers persistent Git-visible tracked changes and non-ignored untracked files, but not ignored files or external side effects.
 
 On resume, acquire the process lock, confirm the lease belongs to the requested run, recompute the fingerprint, and compare it before invoking LangGraph:
 
@@ -340,8 +339,10 @@ fingerprint matches
   → resume
 
 fingerprint changed
-  → refuse resume and retain the lease for manual reconciliation
+  → refuse resume and retain the paused lease for manual reconciliation
 ```
+
+The source repository does not participate in the resume fingerprint. It may change while the run is paused; the checked terminal reconciliation determines whether the workflow-only patch still applies.
 
 ## Nodes
 
@@ -506,11 +507,11 @@ Use these response sets:
 
 ### Complete
 
-Produce a structured summary with status, run ID, attempts, Git-visible changed files, validation results, review decision, override reasons, and remaining concerns. Preserve `completed_with_override` when the human explicitly accepts failed validation or unresolved review findings, include the evidence and acknowledgement, and never label that outcome as an ordinary success. Derive Git-visible changed files from the clean baseline, checkpoint the terminal state, then remove the repository lease. Do not commit or push.
+Produce a structured summary with status, run ID, attempts, workflow-only Git-visible changed files, validation results, review decision, override reasons, and remaining concerns. Preserve `completed_with_override` when the human explicitly accepts failed validation or unresolved review findings, include the evidence and acknowledgement, and never label that outcome as an ordinary success. Derive changes from the workspace's private baseline, checkpoint the terminal state, reconcile the checked patch into the source, then remove the repository lease. Do not commit or push.
 
 ### Failed
 
-Preserve the run ID, repository path, Git baseline, attempt count, worker error, validation failures, review feedback, human response, current Git-visible diff, checkpoint identifier, boundary evidence, and stop reason. Checkpoint the terminal state, then remove the repository lease. The failed run remains inspectable through its run ID.
+Preserve the run ID, source and workspace paths, Git baseline, attempt count, worker error, validation failures, review feedback, human response, current workflow-only diff, checkpoint identifier, boundary evidence, and stop reason. Checkpoint the terminal state, remove the repository lease, and preserve an unreconciled workspace. The failed run remains inspectable through its run ID.
 
 ## Routing rules
 
@@ -645,7 +646,7 @@ const config = { configurable: { thread_id: runId } };
 
 The checkpointer is authoritative for state, pending nodes, interrupts, and resume behavior. Do not duplicate execution position in `WorkflowState`. The status command reports pending nodes from `(await graph.getState(config)).next`, plus the checkpoint count and latest checkpoint ID. It does not infer completed nodes from `StateSnapshot.next`, because that tuple identifies scheduled work rather than proven completion. The internal `prepare_human_checkpoint` node persists waiting status, changed files, and the pause fingerprint before `human_checkpoint` calls `interrupt()`, because an interrupted node cannot checkpoint its return value before stopping.
 
-Because Codex edits the repository outside the SQLite checkpoint transaction, a process crash after an edit but before the next checkpoint may cause the coder node to run again. Resume reacquires the global lock, validates the repository lease, confirms the recorded HEAD and branch, verifies the pause fingerprint when one exists, and lets Codex inspect and continue from partial workflow changes. The clean starting baseline makes Git-visible changes attributable to the run; ignored files remain outside that guarantee and the workflow never resets either category automatically.
+Because Codex edits the workspace outside the SQLite checkpoint transaction, a process crash after an edit but before the next checkpoint may cause the coder node to run again. Resume reacquires the global lock, validates the source-keyed repository lease, confirms the workspace HEAD, verifies the pause fingerprint when one exists, and lets Codex inspect and continue from partial workflow changes. The private seeded index makes Git-visible workflow changes attributable to the run; ignored files remain outside that guarantee and the workflow never resets either category automatically.
 
 Keep checkpointed state restricted to the validated primitive values and plain objects defined by `WorkflowState`; do not checkpoint class instances, subprocess handles, errors, or opaque library objects.
 
@@ -700,7 +701,7 @@ agent-workflow resume 019abc... \
   --validate "npm test"
 ```
 
-Validate that the run is waiting, the repository lease belongs to it, the pause fingerprint still matches, and the response is allowed for that interrupt reason. Then resume the same checkpoint with `Command(resume=...)`. Do not restart planning unless explicitly requested.
+Validate that the run is waiting, the source-keyed repository lease belongs to it, the isolated workspace fingerprint still matches, and the response is allowed for that interrupt reason. Then resume the same checkpoint with `Command(resume=...)`. Do not restart planning unless explicitly requested.
 
 ## Configuration
 
@@ -737,7 +738,7 @@ Hermes memory may supply user preferences, repository conventions, prior archite
 
 ## Security boundaries
 
-The workflow may read the selected repository, allow Codex to modify files inside it, run explicitly trusted validation commands, call Hermes and Codex, inspect Git state, and write checkpoint, lock, and lease data under its user-level data root.
+The workflow may read the selected repository, create and modify an isolated worktree under its user-level data root, run explicitly trusted validation commands there, call Hermes and Codex, inspect Git state, and apply a checked workflow-only patch back to the selected repository. It also writes checkpoint, lock, lease, workspace, and private-index data under its user-level data root.
 
 The workflow is not a hardened credential-isolation boundary. It disables Codex shell network access and web search, retains Codex sandboxing, and does not intentionally expose credentials. Hermes and trusted validation commands remain local processes operating under the invoking user's account.
 
@@ -763,7 +764,7 @@ A changed HEAD, changed branch, or detected persistent Git-visible Hermes mutati
 
 ### Validation timeout
 
-Spawn each worker or validation command in its own Unix process group. On timeout, send `SIGTERM` to the group, escalate to `SIGKILL` after the grace period, and clear the delayed kill when the group exits. Apply the same process-group termination on CLI `SIGINT` or `SIGTERM`, then reject through the existing invocation cleanup so the repository lease is released without discarding partial edits. Mark a timed-out command failed and send its details to Codex on the next allowed attempt.
+Spawn each worker or validation command in its own Unix process group. On timeout, send `SIGTERM` to the group, escalate to `SIGKILL` after the grace period, and clear the delayed kill when the group exits. On CLI `SIGINT` or `SIGTERM`, terminate the active group, stop the TUI, release the running repository lease, and preserve the checkpoint and isolated workspace before exiting with the conventional signal code. Mark a timed-out command failed and send its details to Codex on the next allowed attempt.
 
 ### Retry exhaustion
 
@@ -792,11 +793,11 @@ Test pure routing functions for research decisions, deterministic review escalat
 
 ### Command-wrapper tests
 
-Mock subprocess execution and cover successful and failed Hermes/Codex calls, usable output with nonzero exit, malformed output, timeouts, missing executables, invalid repositories, dirty-worktree and detached-HEAD refusal, HEAD and branch invariants, explicit Codex network/search overrides, validation source selection and shell invocation, and output truncation.
+Mock subprocess execution and cover successful and failed Hermes/Codex calls, usable output with nonzero exit, malformed output, timeouts, missing executables, invalid repositories, dirty-worktree isolation, detached-HEAD refusal, HEAD invariants, explicit Codex network/search overrides, validation source selection and shell invocation, and output truncation.
 
 ### Graph tests
 
-Compile with fake workers and verify node order, worker-error routing, attempt increments, checkpoint persistence, interrupt behavior, operator guidance, environment-failure retry, correct resume routing, and that completed nodes are not unnecessarily rerun. Verify status reports pending positions, checkpoint count, and latest checkpoint ID without treating scheduled nodes as completed. Verify a second `run` or `resume` fails while the global lock is held, a leased repository rejects another run after pause, a mismatched pause fingerprint refuses resume, and terminal or unexpected caught outcomes remove the lease.
+Compile with fake workers and verify node order, worker-error routing, attempt increments, checkpoint persistence, interrupt behavior, operator guidance, environment-failure retry, correct resume routing, and that completed nodes are not unnecessarily rerun. Verify status reports pending positions, checkpoint count, latest checkpoint ID, source and workspace paths, workflow-only changes, and reconciliation state without treating scheduled nodes as completed. Verify a second `run` or `resume` fails while the global lock is held, a paused leased repository rejects another run, a dead running lease is reclaimed, a mismatched workspace fingerprint refuses resume, signal and terminal outcomes remove the lease, successful reconciliation applies only workflow changes, and conflicting reconciliation preserves the workspace.
 
 ### Manual integration test
 
@@ -806,13 +807,13 @@ Use a disposable Git repository with this task:
 Add a function that returns the sum of two integers and add tests.
 ```
 
-Validate with `bun run test`. Confirm a dirty or detached-HEAD repository is refused, runtime files stay outside the target repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, HEAD and branch remain fixed, validation executes, review runs only when required, pause creates a lease and fingerprint, state persists through Bun-native SQLite, status is inspectable, and an unchanged repository resumes.
+Validate with `bun run test`. Confirm a dirty named-branch repository runs in isolation while detached HEAD is refused, runtime files and the worktree stay outside the source repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, workspace HEAD remains fixed, validation executes in the workspace, review runs only when required, pause creates a source-keyed lease and workspace fingerprint, state persists through Bun-native SQLite, status is inspectable, an unchanged workspace resumes, and successful reconciliation applies only the workflow delta.
 
 ## Implementation phases
 
 ### Phase 1: Command wrappers — implemented
 
-`runHermes()`, `runCodex()`, and `runValidationCommand()` use Bun's Node-compatible `node:child_process` implementation with timeouts, bounded captured output, structured errors, clean-worktree and named-branch preflight, Git-visible fingerprinting, Git invariant checks, and explicit Codex network/search overrides. Startup feature-detects the required real CLI flags, while automated tests use controlled fakes.
+`runHermes()`, `runCodex()`, and `runValidationCommand()` use Bun's Node-compatible `node:child_process` implementation with timeouts, bounded captured output, structured errors, named-branch preflight, isolated-worktree execution, Git-visible fingerprinting, Git invariant checks, and explicit Codex network/search overrides. Startup feature-detects the required real CLI flags, while automated tests use controlled fakes.
 
 ### Phase 2: Minimal graph — implemented
 
@@ -857,14 +858,15 @@ The first usable release satisfies these criteria:
 - Human input can pause and resume the same checkpoint.
 - Failed validation can finish only through explicit `completed_with_override` semantics.
 - Every reachable recoverable worker failure has an explicit interrupt reason and response set.
-- A new run refuses to start from a dirty worktree and never resets or cleans user changes.
+- A new run accepts dirty tracked and non-ignored untracked source state, seeds it into an isolated worktree, and never resets or cleans user changes.
 - A new run refuses detached HEAD and records a named active branch.
-- HEAD and the active branch remain unchanged; changed files are derived from the clean baseline.
+- The isolated workspace HEAD remains unchanged; changed files are derived from its private seeded baseline.
 - Changed-file reporting covers Git-visible files and non-ignored untracked additions; ignored files are explicitly outside the guarantee.
+- Successful terminal reconciliation applies only the workflow delta after `git apply --check`; a conflict preserves the workspace and source state.
 - Hermes persistent Git-visible mutation or a Git invariant violation fails immediately without resume.
 - One global process lock prevents concurrent `run` and `resume` writers.
-- A persistent repository lease prevents another run from claiming a paused run's repository.
-- Resume refuses a changed pause fingerprint and retains the lease for manual reconciliation.
+- A persistent repository lease prevents another run from claiming a paused run's source repository, while dead running leases are reclaimed automatically.
+- Resume refuses a changed workspace fingerprint and retains the paused lease for manual reconciliation.
 - Codex runs with shell network access and web search explicitly disabled.
 - No server or external infrastructure is required.
 - The implementation remains understandable by one developer in one sitting.
@@ -873,7 +875,6 @@ The first usable release satisfies these criteria:
 
 Add only after actual usage justifies them:
 
-- Git worktree isolation per run, enabling future dirty-worktree support;
 - GitHub issue input or explicitly approved pull-request creation;
 - multiple fixed workflow templates;
 - Postgres checkpoints for concurrency;
