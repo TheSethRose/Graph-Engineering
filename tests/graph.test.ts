@@ -271,6 +271,70 @@ test("SQLite persists a missing-validation interrupt and resumes the same thread
   }
 });
 
+test("research mode off skips research after validation is provided", async () => {
+  const fixture = await repository();
+  const calls: string[] = [];
+  const hermes = (async (_prompt, _repo, _timeout, kind) => {
+    calls.push(kind);
+    return {
+      result: ok(["hermes"]),
+      output:
+        kind === "planner"
+          ? {
+              ...plannerOutput(),
+              research_required: true,
+              research_reason: "Confirm an implementation detail",
+            }
+          : kind === "research"
+            ? { findings: "should not run" }
+            : { decision: "approved" as const, findings: "fine" },
+    };
+  }) as typeof runHermes;
+  const codex = (async (_prompt, repo) => {
+    calls.push("coder");
+    await writeFile(join(repo, "sum.ts"), "export const sum = (a: number, b: number) => a + b;\n");
+    return { result: ok(["codex"]), summary: "implemented" };
+  }) as typeof runCodex;
+  const validate = (async () => {
+    calls.push("validation");
+    return ok(["npm", "test"]);
+  }) as typeof runValidationCommand;
+  try {
+    const graph = buildGraph(new MemorySaver(), {
+      hermes,
+      codex,
+      validate,
+      dataRoot: join(fixture.root, "data"),
+    });
+    const input = initial(fixture, {
+      validationCommands: [],
+      validationSource: undefined,
+      researchMode: "off",
+    });
+    await graph.invoke(input, { configurable: { thread_id: input.runId } });
+    let state = (
+      await graph.getState({ configurable: { thread_id: input.runId } })
+    ).values as WorkflowStateValue;
+    assert.equal(state.status, "waiting_for_human");
+    assert.equal(state.humanReason, "validation_commands_missing");
+    assert.deepEqual(calls, ["planner"]);
+
+    await graph.invoke(
+      resumeCommand({ response: "provide_validation", validationCommands: ["npm test"] }),
+      { configurable: { thread_id: input.runId } },
+    );
+    state = (
+      await graph.getState({ configurable: { thread_id: input.runId } })
+    ).values as WorkflowStateValue;
+    assert.equal(state.status, "completed");
+    assert.equal(state.validationPassed, true);
+    assert.equal(state.researchFindings, "");
+    assert.deepEqual(calls, ["planner", "coder", "validation"]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("review changes loop to Codex and exhausted failures require explicit override", async () => {
   const fixture = await repository();
   let coderCalls = 0;

@@ -386,7 +386,7 @@ Keep `trustedReviewRisks()` small and deterministic. It escalates authentication
 
 **Worker:** Hermes or a configured deterministic research command
 
-Run only when `research_required` identifies a real gap such as current API behavior, library documentation, security guidance, compatibility uncertainty, or a referenced external artifact. Ordinary repository inspection is not research.
+Run only when `research_required` identifies a real gap such as current API behavior, library documentation, security guidance, compatibility uncertainty, or a referenced external artifact. `research_mode: "off"` suppresses this optional step both after planning and when a missing-validation pause resumes. Ordinary repository inspection is not research.
 
 The result is concise implementation input for Codex. Research never writes repository files or decides graph routing. Expected Hermes CLI, timeout, or parsing failures store `workerErrorSource = "research"` and route to `agent_execution_failed`; unexpected application errors throw normally.
 
@@ -511,7 +511,7 @@ planner
   ├── boundary violation → failed
   ├── expected worker failure → human_checkpoint
   ├── no trusted validation commands → human_checkpoint
-  ├── research_required → research
+  ├── research_required and research_mode is auto → research
   └── otherwise → coder
 
 research
@@ -545,7 +545,7 @@ human_checkpoint
   ├── revise → coder
   ├── accept_with_failed_validation → complete with override status
   ├── accept_with_review_findings → complete with override status
-  ├── provide_validation → research or coder
+  ├── provide_validation → research only when still required and research_mode is auto; otherwise coder
   ├── retry agent execution → planner, research, or reviewer
   ├── retry Codex execution → coder
   └── abort → failed

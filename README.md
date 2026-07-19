@@ -79,6 +79,8 @@ agent-workflow resume 019abc... \
 
 `--help` lists every command, option, and resume response. `run` prints its stable run ID before calling Hermes. Add `--verbose` to `run` or `resume` to print redacted worker command lines, emitted stdout and stderr, ten-second heartbeats, and exit details. Hermes one-shot mode emits only its final response, so its internal tool calls are not available to this CLI. `status` reads checkpoints without executing the graph, while `resume` requires a response allowed by the active interrupt and rejects a changed repository fingerprint.
 
+`--research-mode off` suppresses optional Hermes research. A planner research request then routes directly to Codex, including when a missing-validation pause resumes after the caller provides trusted commands.
+
 ## Boundaries
 
 The initial version is synchronous, single-process, and local to macOS or Unix. It will not provide a server, dashboard, queue, plugin system, dynamic graphs, parallel writers, deployments, commits, pushes, pull requests, or untested Windows support. Runtime state lives under `$XDG_DATA_HOME/agent-workflow` or `~/.local/share/agent-workflow`, never in a target repository.

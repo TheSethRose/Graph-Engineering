@@ -160,7 +160,7 @@ Useful command-line options include:
 
 - `--max-attempts 3` limits coding and review attempts.
 - `--review-required` requests a Hermes review even when the workflow does not require one by risk rules.
-- `--research-mode off` skips optional research.
+- `--research-mode off` skips optional research both after planning and after a missing-validation pause resumes.
 - `--hermes-timeout-seconds`, `--codex-timeout-seconds`, and `--validation-timeout-seconds` set positive timeout values for slow work.
 
 ## Common problems

@@ -61,6 +61,7 @@ Expected worker failures also need graph data, not exceptions alone. Hermes CLI,
 
 - Use fixed strict-TypeScript graph definitions, Zod-validated state, and pure routing functions.
 - Use direct `codex exec`; Hermes never launches Codex.
+- Treat research as optional: `research_mode: "off"` bypasses it after planning and after missing-validation resume.
 - Use local sequential execution and `SqliteSaver` until concurrency is a measured requirement.
 - Use strict structured output for planner, coder summary, and reviewer decisions.
 - Enforce review with small deterministic risk rules in addition to planner and user requests.

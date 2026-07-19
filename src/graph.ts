@@ -434,7 +434,11 @@ export function buildGraph(
         validationCommands: payload.validationCommands,
         validationSource: "cli",
         resumeTarget:
-          state.researchRequired && !state.researchFindings ? "research" : "coder",
+          state.researchRequired &&
+          state.researchMode === "auto" &&
+          !state.researchFindings
+            ? "research"
+            : "coder",
       };
     }
     if (payload.response === "retry" && state.workerErrorSource) {
