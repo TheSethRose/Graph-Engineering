@@ -26,10 +26,10 @@ CODEX_PATH=/absolute/path/to/codex
 Confirm that the command is available:
 
 ```bash
-agent-workflow
+agent-workflow --help
 ```
 
-It will print the command usage. If you skipped `npm link`, run every example from this repository and replace `agent-workflow` with `npm run agent-workflow --`.
+It will print every command, option, and resume response. If you skipped `npm link`, run every example from this repository and replace `agent-workflow` with `npm run agent-workflow --`.
 
 ## Prepare the repository you want to change
 

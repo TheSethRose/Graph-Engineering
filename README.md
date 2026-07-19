@@ -60,6 +60,8 @@ An already exported `HERMES_PATH` or `CODEX_PATH` takes precedence over the file
 ## Command surface
 
 ```bash
+agent-workflow --help
+
 agent-workflow run \
   --repo "/absolute/path/to/repository" \
   --task "Add CSV export for scheduled posts." \
@@ -74,7 +76,7 @@ agent-workflow resume 019abc... \
   --message "Keep the existing API shape."
 ```
 
-`run` prints its stable run ID before calling Hermes. `status` reads checkpoints without executing the graph, while `resume` requires a response allowed by the active interrupt and rejects a changed repository fingerprint.
+`--help` lists every command, option, and resume response. `run` prints its stable run ID before calling Hermes. `status` reads checkpoints without executing the graph, while `resume` requires a response allowed by the active interrupt and rejects a changed repository fingerprint.
 
 ## Boundaries
 

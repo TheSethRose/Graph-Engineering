@@ -645,7 +645,7 @@ Expose one local command:
 agent-workflow
 ```
 
-Required commands are `run`, `status`, and `resume`. `history` and `cancel` may be added later.
+Required commands are `run`, `status`, and `resume`. `agent-workflow --help` prints their complete command-line surface and exits successfully without opening checkpoints or invoking workers. `history` and `cancel` may be added later.
 
 ### Run
 

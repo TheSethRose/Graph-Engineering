@@ -21,11 +21,48 @@ import { loadWorkflowConfig, type ConfigOverrides } from "./validation.js";
 
 type Parsed = { positionals: string[]; options: Map<string, string[]> };
 
-function usage(): never {
-  throw new Error(`Usage:
-  agent-workflow run --repo PATH --task TASK [--validate COMMAND ...] [--max-attempts N] [--review-required]
+const HELP = `Agent Workflow runs a local Hermes, Codex, validation, and review workflow.
+
+Usage:
+  agent-workflow --help
+  agent-workflow run --repo PATH --task TASK [OPTIONS]
   agent-workflow status RUN_ID
-  agent-workflow resume RUN_ID --response RESPONSE [--message MESSAGE] [--validate COMMAND ...]`);
+  agent-workflow resume RUN_ID --response RESPONSE [OPTIONS]
+
+Commands:
+  run       Start a new workflow in a clean Git repository.
+  status    Inspect a saved run without executing it.
+  resume    Continue a run that is waiting for human input.
+
+Run options:
+  --repo PATH                       Target Git repository. Required.
+  --task TASK                       Exact change to make. Required.
+  --validate COMMAND                Trusted validation command. Repeatable.
+  --max-attempts N                  Positive limit for implementation attempts.
+  --review-required                 Require Hermes review after implementation and validation.
+  --research-mode auto|off          Allow or disable optional Hermes research.
+  --hermes-timeout-seconds N        Positive Hermes timeout in seconds.
+  --codex-timeout-seconds N         Positive Codex timeout in seconds.
+  --validation-timeout-seconds N    Positive timeout for each validation command.
+
+Resume options:
+  --response RESPONSE               A response listed by status. Required.
+  --message MESSAGE                 Required for revise and override responses.
+  --validate COMMAND                Repeatable; allowed only with provide_validation.
+
+Responses:
+  approve | revise | abort | retry | provide_validation
+  accept_with_failed_validation | accept_with_review_findings
+
+Notes:
+  Run settings other than --repo and --task may come from a tracked .agent-workflow.json.
+  Repeated --validate flags replace validation commands from that file.
+  --review-required is a post-implementation Hermes review, not human approval before editing.
+  Run "agent-workflow status RUN_ID" before resuming or restarting a saved run.
+`;
+
+function usage(): never {
+  throw new Error(`${HELP}\nRun "agent-workflow --help" for command details.`);
 }
 
 function parseArgs(args: string[]): Parsed {
@@ -323,7 +360,12 @@ async function resume(parsed: Parsed): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  if (argv.length === 1 && argv[0] === "--help") {
+    process.stdout.write(HELP);
+    return;
+  }
+  const [command, ...args] = argv;
   if (!command) usage();
   const parsed = parseArgs(args);
   if (command === "run") return await run(parsed);
