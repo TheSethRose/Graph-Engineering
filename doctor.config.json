@@ -1,0 +1,23 @@
+{
+  "$schema": "https://react.doctor/schema/config.json",
+  "ignore": {
+    "files": [
+      "dist/**",
+      "node_modules/**"
+    ],
+    "overrides": [
+      {
+        "files": ["src/cli.ts"],
+        "rules": ["deslop/unused-file"]
+      }
+    ]
+  },
+  "adoptExistingLintConfig": true,
+  "respectInlineDisables": true,
+  "supplyChain": {
+    "enabled": true,
+    "minScore": 50,
+    "severity": "error",
+    "includeDevDependencies": true
+  }
+}

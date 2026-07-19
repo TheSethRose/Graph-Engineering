@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/agent-workflow/
+!.agents/skills/agent-workflow/SKILL.md
+
+# Build and Tooling Outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Databases (SQLite checkpointer files)
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.db-journal
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / IDE settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Local environment and package-manager credentials
+.env*
+!.env.example
+.npmrc
+
+# Repomix outputs
+repomix-output.*
