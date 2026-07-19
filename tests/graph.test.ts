@@ -351,7 +351,42 @@ test("review changes loop to Codex and exhausted failures require explicit overr
       await failingGraph.getState({ configurable: { thread_id: overrideRun.runId } })
     ).values as WorkflowStateValue;
     assert.equal(overrideState.status, "completed_with_override");
+    assert.equal(overrideState.humanReason, undefined);
     assert.match(overrideState.overrideReasons[0] ?? "", /Known failure accepted/);
+
+    const emptyRevisionRun = initial(fixture, {
+      runId: `empty-revision-${Date.now()}`,
+      task: "Reject an empty revision",
+      maxAttempts: 1,
+    });
+    await failingGraph.invoke(emptyRevisionRun, {
+      configurable: { thread_id: emptyRevisionRun.runId },
+    });
+    await assert.rejects(
+      failingGraph.invoke(
+        resumeCommand({ response: "revise" }),
+        { configurable: { thread_id: emptyRevisionRun.runId } },
+      ),
+      /revise requires corrective guidance/,
+    );
+
+    const abortRun = initial(fixture, {
+      runId: `abort-${Date.now()}`,
+      task: "Abort another failed change",
+      maxAttempts: 1,
+    });
+    await failingGraph.invoke(abortRun, {
+      configurable: { thread_id: abortRun.runId },
+    });
+    await failingGraph.invoke(
+      resumeCommand({ response: "abort", message: "Stop this run." }),
+      { configurable: { thread_id: abortRun.runId } },
+    );
+    const abortedState = (
+      await failingGraph.getState({ configurable: { thread_id: abortRun.runId } })
+    ).values as WorkflowStateValue;
+    assert.equal(abortedState.status, "failed");
+    assert.equal(abortedState.humanReason, undefined);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -525,6 +560,35 @@ if (args[0] === "--help") {
     assert.deepEqual(
       JSON.parse(await readFile(join(dataHome, "agent-workflow", "active-runs.json"), "utf8")),
       {},
+    );
+
+    await exec("git", ["add", "sum.ts"], { cwd: fixture.repo });
+    await exec("git", ["commit", "-m", "prepare revise validation"], { cwd: fixture.repo });
+    const failedValidation = await exec(
+      process.execPath,
+      [
+        cli,
+        "run",
+        "--repo",
+        fixture.repo,
+        "--task",
+        "Exercise revision validation",
+        "--validate",
+        "false",
+        "--max-attempts",
+        "1",
+      ],
+      { cwd: process.cwd(), env, maxBuffer: 2 * 1024 * 1024 },
+    );
+    const failedRunId = /Run ID: ([^\s]+)/.exec(failedValidation.stdout)?.[1];
+    assert.ok(failedRunId);
+    await assert.rejects(
+      exec(
+        process.execPath,
+        [cli, "resume", failedRunId, "--response", "revise"],
+        { cwd: process.cwd(), env },
+      ),
+      /revise requires --message with corrective guidance/,
     );
     await assert.rejects(readFile(join(fixture.repo, "checkpoints.sqlite3")), /ENOENT/);
   } finally {

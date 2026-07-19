@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
   loadAgentEnvironment,
@@ -67,6 +68,31 @@ test("runCommand captures success, failure, missing executables, timeout, and tr
   });
   assert.match(truncated.stdout, /output truncated/);
   assert.equal(redact("token=abc123456 secret: hidden-value"), "token=[REDACTED] secret: [REDACTED]");
+});
+
+test("runCommand terminates descendant processes when it times out", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-process-group-"));
+  const marker = join(root, "orphan.txt");
+  const childScript = `
+const { spawn } = require("node:child_process");
+spawn(process.execPath, [
+  "-e",
+  "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'orphan'), 300)",
+  process.argv[1],
+], { stdio: "ignore" });
+setTimeout(() => {}, 10_000);
+`;
+  try {
+    const result = await runCommand(process.execPath, ["-e", childScript, marker], {
+      cwd: root,
+      timeoutMs: 20,
+    });
+    assert.equal(result.timedOut, true);
+    await delay(400);
+    await assert.rejects(access(marker), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Hermes output is strict JSON and malformed output is a recoverable result", async () => {
