@@ -97,5 +97,6 @@ export async function runValidationCommand(
     cwd: repo,
     timeoutMs,
     recordedArgv: ["/bin/sh", "-lc", command],
+    traceLabel: "validation",
   });
 }

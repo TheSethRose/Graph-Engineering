@@ -11,7 +11,18 @@ type RunOptions = {
   recordedArgv?: string[];
   maxBytes?: number;
   redactOutput?: boolean;
+  traceLabel?: string;
 };
+
+let commandTracing = false;
+
+export function setCommandTracing(enabled: boolean): void {
+  commandTracing = enabled;
+}
+
+function traceCommand(event: string, fields: Record<string, unknown>): void {
+  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), event, ...fields })}\n`);
+}
 
 function capped(text: string, maxBytes: number): string {
   const bytes = Buffer.from(text);
@@ -46,7 +57,7 @@ export async function runCommand(
 ): Promise<CommandResult> {
   const started = performance.now();
   const maxBytes = options.maxBytes ?? OUTPUT_LIMIT_BYTES;
-  return await new Promise((resolve) => {
+  return await new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -57,11 +68,43 @@ export async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
+    const tracing = commandTracing && options.traceLabel !== undefined;
+    let tracedStdout = "";
+    let tracedStderr = "";
+    const traceLines = (stream: "stdout" | "stderr", chunk: string): void => {
+      if (!tracing) return;
+      const pending = (stream === "stdout" ? tracedStdout : tracedStderr) + chunk;
+      const lines = pending.split(/\r?\n/);
+      const remainder = lines.pop() ?? "";
+      if (stream === "stdout") tracedStdout = remainder;
+      else tracedStderr = remainder;
+      for (const line of lines) {
+        traceCommand("command_output", {
+          label: options.traceLabel,
+          stream,
+          text: redact(line),
+        });
+      }
+    };
+    if (tracing) {
+      traceCommand("command_start", {
+        label: options.traceLabel,
+        cwd: options.cwd,
+        argv: [executable, ...args].map(redact),
+        pid: child.pid,
+      });
+    }
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      if (Buffer.byteLength(stdout) <= maxBytes) stdout += chunk;
+      if (Buffer.byteLength(stdout) <= maxBytes) {
+        stdout += chunk;
+        traceLines("stdout", chunk);
+      }
     });
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-      if (Buffer.byteLength(stderr) <= maxBytes) stderr += chunk;
+      if (Buffer.byteLength(stderr) <= maxBytes) {
+        stderr += chunk;
+        traceLines("stderr", chunk);
+      }
     });
     child.on("error", (error) => {
       spawnError = error;
@@ -78,15 +121,66 @@ export async function runCommand(
         }
       }
     };
+    let interruptedSignal: NodeJS.Signals | undefined;
+    const interrupt = (signal: NodeJS.Signals): void => {
+      interruptedSignal ??= signal;
+      killProcessGroup("SIGTERM");
+      forceKillTimer ??= setTimeout(() => killProcessGroup("SIGKILL"), 1_000);
+      forceKillTimer.unref();
+    };
+    const onSigint = () => interrupt("SIGINT");
+    const onSigterm = () => interrupt("SIGTERM");
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
     const timer = setTimeout(() => {
       timedOut = true;
       killProcessGroup("SIGTERM");
       forceKillTimer = setTimeout(() => killProcessGroup("SIGKILL"), 1_000);
       forceKillTimer.unref();
     }, options.timeoutMs);
+    const heartbeat = tracing
+      ? setInterval(() => {
+          traceCommand("command_running", {
+            label: options.traceLabel,
+            pid: child.pid,
+            durationMs: Math.max(0, Math.round(performance.now() - started)),
+          });
+        }, 10_000)
+      : undefined;
+    heartbeat?.unref();
     child.on("close", (code) => {
       clearTimeout(timer);
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      if (heartbeat) clearInterval(heartbeat);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (tracing) {
+        if (tracedStdout) {
+          traceCommand("command_output", {
+            label: options.traceLabel,
+            stream: "stdout",
+            text: redact(tracedStdout),
+          });
+        }
+        if (tracedStderr) {
+          traceCommand("command_output", {
+            label: options.traceLabel,
+            stream: "stderr",
+            text: redact(tracedStderr),
+          });
+        }
+        traceCommand("command_complete", {
+          label: options.traceLabel,
+          pid: child.pid,
+          exitCode: spawnError ? null : code,
+          timedOut,
+          durationMs: Math.max(0, Math.round(performance.now() - started)),
+        });
+      }
+      if (interruptedSignal) {
+        reject(new Error(`Command interrupted by ${interruptedSignal}.`));
+        return;
+      }
       resolve({
         argv: options.recordedArgv ?? [executable, ...args],
         exitCode: spawnError ? null : code,
@@ -143,6 +237,7 @@ export async function runHermes(
     cwd: repo,
     timeoutMs,
     recordedArgv: [executable, "-z", "<prompt>"],
+    traceLabel: kind,
   });
   if (result.exitCode !== 0 || result.timedOut) return { result };
   try {
@@ -208,6 +303,7 @@ export async function runCodex(
     const result = await runCommand(executable, args, {
       cwd: repo,
       timeoutMs,
+      traceLabel: "coder",
       recordedArgv: [
         executable,
         "--ask-for-approval",

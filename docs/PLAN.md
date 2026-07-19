@@ -754,7 +754,7 @@ A changed HEAD, changed branch, or detected persistent Git-visible Hermes mutati
 
 ### Validation timeout
 
-Spawn each worker or validation command in its own Unix process group. On timeout, send `SIGTERM` to the group, escalate to `SIGKILL` after the grace period, and clear the delayed kill when the group exits. Mark the command failed and send the timeout details to Codex on the next allowed attempt.
+Spawn each worker or validation command in its own Unix process group. On timeout, send `SIGTERM` to the group, escalate to `SIGKILL` after the grace period, and clear the delayed kill when the group exits. Apply the same process-group termination on CLI `SIGINT` or `SIGTERM`, then reject through the existing invocation cleanup so the repository lease is released without discarding partial edits. Mark a timed-out command failed and send its details to Codex on the next allowed attempt.
 
 ### Retry exhaustion
 
@@ -771,7 +771,7 @@ Human interrupt: no automatic timeout
 
 ## Logging
 
-Write structured JSON events to stderr through one small logging helper. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. Redact likely secrets from captured output before writing logs or checkpoints.
+Write structured JSON events to stderr through one small logging helper. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. An opt-in `--verbose` flag on `run` and `resume` also records each redacted worker command, emitted output, ten-second heartbeat, and completion. Hermes one-shot mode exposes only its final response, so the workflow cannot stream Hermes-internal tool calls. Redact likely secrets from captured output before writing logs or checkpoints.
 
 The first version does not require LangSmith.
 

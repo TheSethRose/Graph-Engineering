@@ -37,10 +37,11 @@ agent-workflow run \
   --validate "npm run typecheck" \
   --validate "npm test" \
   --max-attempts 3 \
-  --review-required
+  --review-required \
+  --verbose
 ```
 
-`--validate` is repeatable and replaces validation commands from `.agent-workflow.json`. Optional run flags are `--research-mode auto|off`, `--hermes-timeout-seconds`, `--codex-timeout-seconds`, and `--validation-timeout-seconds`; use `--help` for their exact forms. `--review-required` requests Hermes review after Codex edits and validation. It is not a human approval gate before implementation.
+`--validate` is repeatable and replaces validation commands from `.agent-workflow.json`. Use `--verbose` when the user wants redacted worker commands, output, and heartbeats in the active terminal. Hermes one-shot mode exposes only its final response, not its internal tool calls. Other optional run flags are `--research-mode auto|off`, `--hermes-timeout-seconds`, `--codex-timeout-seconds`, and `--validation-timeout-seconds`; use `--help` for their exact forms. `--review-required` requests Hermes review after Codex edits and validation. It is not a human approval gate before implementation.
 
 Report the printed run ID immediately. The command is synchronous, and LangGraph owns routing, retries, checkpoints, and terminal status after startup. Do not run Codex separately for the same task or start a replacement workflow because output is slow.
 

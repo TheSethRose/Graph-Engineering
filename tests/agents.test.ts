@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import {
   runCodex,
   runCommand,
   runHermes,
+  setCommandTracing,
 } from "../src/agents.js";
 
 test("agent executable paths load from an explicit env file", async () => {
@@ -70,6 +72,32 @@ test("runCommand captures success, failure, missing executables, timeout, and tr
   assert.equal(redact("token=abc123456 secret: hidden-value"), "token=[REDACTED] secret: [REDACTED]");
 });
 
+test("verbose command tracing shows redacted commands, output, and completion", async () => {
+  const originalWrite = process.stderr.write;
+  let trace = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    trace += chunk.toString();
+    return true;
+  }) as typeof process.stderr.write;
+  setCommandTracing(true);
+  try {
+    await runCommand(
+      process.execPath,
+      ["-e", "process.stdout.write('token=hidden-value\\nfinished')"],
+      { cwd: process.cwd(), timeoutMs: 2_000, traceLabel: "test" },
+    );
+  } finally {
+    setCommandTracing(false);
+    process.stderr.write = originalWrite;
+  }
+
+  assert.match(trace, /"event":"command_start"/);
+  assert.match(trace, /"label":"test"/);
+  assert.match(trace, /token=\[REDACTED\]/);
+  assert.doesNotMatch(trace, /hidden-value/);
+  assert.match(trace, /"event":"command_complete"/);
+});
+
 test("runCommand terminates descendant processes when it times out", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-workflow-process-group-"));
   const marker = join(root, "orphan.txt");
@@ -89,6 +117,32 @@ setTimeout(() => {}, 10_000);
     });
     assert.equal(result.timedOut, true);
     await delay(400);
+    await assert.rejects(access(marker), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runCommand terminates descendants when its parent receives SIGINT", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-interrupt-"));
+  const marker = join(root, "orphan.txt");
+  const agentsUrl = new URL("../src/agents.js", import.meta.url).href;
+  const childScript = `
+import { runCommand } from ${JSON.stringify(agentsUrl)};
+await runCommand(process.execPath, [
+  "-e",
+  "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'orphan'), 500)",
+  ${JSON.stringify(marker)},
+], { cwd: ${JSON.stringify(root)}, timeoutMs: 10_000 }).catch(() => { process.exitCode = 130; });
+`;
+  try {
+    const parent = spawn(process.execPath, ["--input-type=module", "-e", childScript], {
+      stdio: "ignore",
+    });
+    await delay(100);
+    parent.kill("SIGINT");
+    await new Promise<void>((resolve) => parent.once("close", () => resolve()));
+    await delay(600);
     await assert.rejects(access(marker), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -14,7 +14,11 @@ import {
   withProcessLock,
   worktreeFingerprint,
 } from "./checkpoint.js";
-import { checkCliCompatibility, loadAgentEnvironment } from "./agents.js";
+import {
+  checkCliCompatibility,
+  loadAgentEnvironment,
+  setCommandTracing,
+} from "./agents.js";
 import { buildGraph, resumeCommand } from "./graph.js";
 import { allowedResponses, type WorkflowStateValue } from "./state.js";
 import { loadWorkflowConfig, type ConfigOverrides } from "./validation.js";
@@ -44,11 +48,13 @@ Run options:
   --hermes-timeout-seconds N        Positive Hermes timeout in seconds.
   --codex-timeout-seconds N         Positive Codex timeout in seconds.
   --validation-timeout-seconds N    Positive timeout for each validation command.
+  --verbose                         Show redacted worker commands, output, and heartbeats.
 
 Resume options:
   --response RESPONSE               A response listed by status. Required.
   --message MESSAGE                 Required for revise and override responses.
   --validate COMMAND                Repeatable; allowed only with provide_validation.
+  --verbose                         Show redacted worker commands, output, and heartbeats.
 
 Responses:
   approve | revise | abort | retry | provide_validation
@@ -68,7 +74,7 @@ function usage(): never {
 function parseArgs(args: string[]): Parsed {
   const positionals: string[] = [];
   const options = new Map<string, string[]>();
-  const booleanFlags = new Set(["--review-required"]);
+  const booleanFlags = new Set(["--review-required", "--verbose"]);
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index]!;
     if (!value.startsWith("--")) {
@@ -179,13 +185,16 @@ async function run(parsed: Parsed): Promise<void> {
     "--hermes-timeout-seconds",
     "--codex-timeout-seconds",
     "--validation-timeout-seconds",
+    "--verbose",
   ]);
   if (parsed.positionals.length > 0) usage();
   const repoInput = one(parsed, "--repo", true)!;
   const task = one(parsed, "--task", true)!.trim();
   if (!task) throw new Error("--task must not be empty.");
   const dataRoot = getDataRoot();
-  await withProcessLock(async () => {
+  setCommandTracing(parsed.options.has("--verbose"));
+  try {
+    await withProcessLock(async () => {
     const baseline = await preflightRepository(repoInput);
     const workflowConfig = await loadWorkflowConfig(baseline.repo, configOverrides(parsed));
     await checkCliCompatibility(baseline.repo);
@@ -234,7 +243,10 @@ async function run(parsed: Parsed): Promise<void> {
     } finally {
       checkpointer.db.close();
     }
-  }, dataRoot);
+    }, dataRoot);
+  } finally {
+    setCommandTracing(false);
+  }
 }
 
 async function status(parsed: Parsed): Promise<void> {
@@ -285,14 +297,16 @@ async function status(parsed: Parsed): Promise<void> {
 }
 
 async function resume(parsed: Parsed): Promise<void> {
-  rejectUnknown(parsed, ["--response", "--message", "--validate"]);
+  rejectUnknown(parsed, ["--response", "--message", "--validate", "--verbose"]);
   if (parsed.positionals.length !== 1) usage();
   const runId = parsed.positionals[0]!;
   const response = one(parsed, "--response", true)!;
   const message = one(parsed, "--message") ?? "";
   const validationCommands = parsed.options.get("--validate") ?? [];
   const dataRoot = getDataRoot();
-  await withProcessLock(async () => {
+  setCommandTracing(parsed.options.has("--verbose"));
+  try {
+    await withProcessLock(async () => {
     const checkpointer = await createCheckpointer(dataRoot);
     const graph = buildGraph(checkpointer, { dataRoot });
     try {
@@ -356,7 +370,10 @@ async function resume(parsed: Parsed): Promise<void> {
     } finally {
       checkpointer.db.close();
     }
-  }, dataRoot);
+    }, dataRoot);
+  } finally {
+    setCommandTracing(false);
+  }
 }
 
 async function main(): Promise<void> {

@@ -54,7 +54,8 @@ agent-workflow run \
   --repo "/absolute/path/to/your/repository" \
   --task "Add CSV export for scheduled posts." \
   --validate "npm run typecheck" \
-  --validate "npm test"
+  --validate "npm test" \
+  --verbose
 ```
 
 Write the task as a clear result. Include important limits, such as files that must stay unchanged or an API shape that must remain compatible.
@@ -67,7 +68,7 @@ The command prints a run ID before work begins:
 Run ID: 019abc...
 ```
 
-Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working.
+Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working. `--verbose` shows each redacted worker command, output as the process emits it, a heartbeat every ten seconds, and completion details. Hermes one-shot mode returns only its final response, so heartbeats confirm it is alive but cannot reveal its internal tool calls. Ctrl-C terminates the active worker process group and releases the repository lease without discarding partial edits.
 
 ## Read the result
 

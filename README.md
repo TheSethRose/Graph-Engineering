@@ -67,7 +67,8 @@ agent-workflow run \
   --task "Add CSV export for scheduled posts." \
   --validate "npm run typecheck" \
   --validate "npm test" \
-  --max-attempts 3
+  --max-attempts 3 \
+  --verbose
 
 agent-workflow status 019abc...
 
@@ -76,7 +77,7 @@ agent-workflow resume 019abc... \
   --message "Keep the existing API shape."
 ```
 
-`--help` lists every command, option, and resume response. `run` prints its stable run ID before calling Hermes. `status` reads checkpoints without executing the graph, while `resume` requires a response allowed by the active interrupt and rejects a changed repository fingerprint.
+`--help` lists every command, option, and resume response. `run` prints its stable run ID before calling Hermes. Add `--verbose` to `run` or `resume` to print redacted worker command lines, emitted stdout and stderr, ten-second heartbeats, and exit details. Hermes one-shot mode emits only its final response, so its internal tool calls are not available to this CLI. `status` reads checkpoints without executing the graph, while `resume` requires a response allowed by the active interrupt and rejects a changed repository fingerprint.
 
 ## Boundaries
 
@@ -92,7 +93,7 @@ This is not a hardened credential-isolation boundary. Hermes and trusted validat
 
 Codex and Hermes failures have explicit graph routes instead of falling through to the next node. Every recoverable interrupt reason exposes only its valid responses, while a detected persistent Git-visible Hermes mutation or changed HEAD/branch fails immediately. Ignored-file writes and external side effects are outside the fingerprint guarantee. Accepting failed validation or unresolved review findings produces `completed_with_override`, never ordinary successful completion. Run position is derived from LangGraph checkpoint snapshots and history rather than duplicated state.
 
-An unexpected exception caught by the CLI preserves the last checkpoint and worktree but releases that run's repository lease so it cannot strand the repository. A hard process crash may leave a stale entry in `<data_root>/active-runs.json`; after confirming no workflow process is alive and manually reconciling the worktree, remove only that repository's entry before starting another run.
+Ctrl-C terminates the active worker process group, preserves the last checkpoint and worktree, and releases that run's repository lease. An unexpected exception caught by the CLI has the same preservation and lease cleanup behavior. A hard process crash may leave a stale entry in `<data_root>/active-runs.json`; after confirming no workflow process is alive and manually reconciling the worktree, remove only that repository's entry before starting another run.
 
 ## Prerequisites
 

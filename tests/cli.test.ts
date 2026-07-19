@@ -13,5 +13,6 @@ test("the compiled CLI prints complete help without starting a workflow", async 
   assert.match(stdout, /agent-workflow status RUN_ID/);
   assert.match(stdout, /agent-workflow resume RUN_ID --response RESPONSE/);
   assert.match(stdout, /--validation-timeout-seconds/);
+  assert.match(stdout, /--verbose/);
   assert.match(stdout, /not human approval before editing/);
 });
