@@ -10,6 +10,8 @@ export type TuiView = {
   elapsedMs: number;
   lines: string[];
   footer: string;
+  rows?: number;
+  columns?: number;
 };
 
 function duration(milliseconds: number): string {
@@ -18,7 +20,11 @@ function duration(milliseconds: number): string {
 }
 
 export function renderTui(view: TuiView): string {
-  const body = view.lines.slice(-10);
+  const bodyRows = Math.max(1, (view.rows ?? 15) - 5);
+  const columns = Math.max(20, view.columns ?? 120);
+  const body = view.lines
+    .map((line) => line.length > columns ? `${line.slice(0, columns - 1)}…` : line)
+    .slice(-bodyRows);
   return [
     `agent-workflow · ${view.runId || "starting"}`,
     `${view.node || "preflight"} · attempt ${view.attempt} · ${duration(view.elapsedMs)}`,
@@ -35,7 +41,7 @@ export class WorkflowTui {
   private runId = "";
   private node = "";
   private attempt = 1;
-  private footer = "[p] pause after node  [t] raw trace  [Ctrl-C] cancel";
+  private footer = "[p] pause after node  [t] activity  [Ctrl-C] cancel";
   private pauseRequested = false;
   private traceEnabled: boolean;
   private waiting = false;
@@ -122,11 +128,11 @@ export class WorkflowTui {
     } else if (event === "command_start") {
       this.add(`Running ${String(entry.label)} (pid ${String(entry.pid)}).`);
     } else if (event === "command_running") {
-      this.footer = `${String(entry.label)} running · ${duration(Number(entry.durationMs ?? 0))}  [p] pause after node  [t] trace`;
+      this.footer = `${String(entry.label)} running · ${duration(Number(entry.durationMs ?? 0))}  [p] pause after node  [t] activity`;
     } else if (event === "command_complete") {
       const outcome = entry.timedOut ? "timed out" : `exit ${String(entry.exitCode)}`;
       this.add(`${String(entry.label)} finished: ${outcome}.`);
-      this.footer = "[p] pause after node  [t] raw trace  [Ctrl-C] cancel";
+      this.footer = "[p] pause after node  [t] activity  [Ctrl-C] cancel";
     } else if (event === "command_output" && this.traceEnabled) {
       this.add(`[${String(entry.label)}] ${String(entry.text)}`);
     } else if (event === "interrupt_created") {
@@ -197,7 +203,7 @@ export class WorkflowTui {
       } else if (key === "t") {
         this.traceEnabled = !this.traceEnabled;
         this.changeTrace(this.traceEnabled);
-        this.add(`Raw trace ${this.traceEnabled ? "enabled" : "disabled"}.`);
+        this.add(`Activity ${this.traceEnabled ? "enabled" : "disabled"}.`);
       }
     }
   };
@@ -208,7 +214,7 @@ export class WorkflowTui {
     this.waiting = false;
     this.inputMode = undefined;
     this.inputText = "";
-    this.footer = "[p] pause after node  [t] raw trace  [Ctrl-C] cancel";
+    this.footer = "[p] pause after node  [t] activity  [Ctrl-C] cancel";
     resolve?.(value);
   }
 
@@ -234,6 +240,8 @@ export class WorkflowTui {
       elapsedMs: performance.now() - this.startedAt,
       lines: this.lines,
       footer: this.footer,
+      rows: process.stdout.rows,
+      columns: process.stdout.columns,
     });
     process.stdout.write(`\u001b[2J\u001b[H${view}`);
   }

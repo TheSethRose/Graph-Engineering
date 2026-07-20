@@ -32,7 +32,7 @@ It will print every command, option, and resume response. If you skipped `bun li
 
 ## Prepare the repository you want to change
 
-The target must be a Git repository on a named branch. Uncommitted tracked and non-ignored untracked files are supported: Agent Workflow copies the current source state into an isolated per-run worktree and tracks its own changes against a private baseline.
+The target must be a Git repository on a named branch, but it does not need an initial commit. Uncommitted tracked and non-ignored untracked files are supported: Agent Workflow copies the current source state into an isolated per-run workspace and tracks its own changes against a private baseline.
 
 ```bash
 cd /absolute/path/to/your/repository
@@ -65,9 +65,9 @@ The command prints a run ID before work begins:
 Run ID: 019abc...
 ```
 
-Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working. In the TUI, press `p` to pause after the current graph node. At that safe boundary, press `c` to continue, `g` to type guidance for a new Codex pass, or `a` to abort. Press `t` while running to toggle the redacted raw trace. Hermes one-shot mode returns only its final response, so the TUI can show heartbeats but not Hermes-internal tool calls. Ctrl-C terminates the active worker process group and releases the repository lease without discarding partial edits.
+Save that ID. The run is synchronous, so leave the command open while Hermes, Codex, and validation are working. The TUI fills the terminal with filtered live activity by default: commands, changed file paths, validation results, and final responses, without command output or source-code contents. Press `t` to toggle that view and `p` to pause after the current graph node. At that safe boundary, press `c` to continue, `g` to type guidance for a new Codex pass, or `a` to abort. Hermes one-shot mode returns only its final response, so the TUI can show heartbeats but not Hermes-internal tool calls. Ctrl-C terminates the active worker process group and releases the repository lease without discarding partial edits.
 
-For machine-readable output, use `--no-interactive`; redirected or piped execution also stays structured automatically. `--verbose` adds redacted commands, heartbeats, and completion events to the normal event stream, while `--trace` also includes redacted worker stdout and stderr.
+For machine-readable output, use `--no-interactive`; redirected or piped execution also stays structured automatically. `--verbose` adds redacted commands, heartbeats, and completion events to the normal event stream, while `--trace` also includes filtered worker activity.
 
 ## Read the result
 
@@ -154,7 +154,7 @@ If a repository uses the same settings for most runs, add a tracked `.agent-work
 }
 ```
 
-The file must be Git-tracked before the workflow will use it. Its validation list overrides automatic `AGENTS.md` selection, and commands passed with `--validate` replace the file's validation list for that run.
+After the repository has a commit, the file must be Git-tracked before the workflow will use it. In an unborn repository, the current root `.agent-workflow.json` and `AGENTS.md` belong to the captured baseline and are trusted without staging. The configuration validation list overrides automatic `AGENTS.md` selection, and commands passed with `--validate` replace it for that run.
 
 Useful command-line options include:
 

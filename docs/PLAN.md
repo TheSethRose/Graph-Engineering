@@ -300,13 +300,16 @@ Version one requires a Git repository root on a named branch, but the source may
 
 ```text
 active branch resolves to a name
-  → capture source HEAD and branch, create a run ID, then continue
+  → capture source HEAD state and branch, create a run ID, then continue
 
 HEAD is detached
   → refuse to start without changing anything
+
+HEAD is unborn
+  → continue without requiring an initial commit
 ```
 
-Create an isolated detached Git worktree under `<data_root>/workspaces/<run_id>` at the source HEAD. Apply the source's tracked diff and copy its non-ignored untracked files into that workspace, then populate a private alternate Git index with the seeded state. If the source has `node_modules`, expose it to the workspace through a symlink so ordinary repository validation remains usable without reinstalling dependencies. Workers and validation commands run only in this workspace.
+When the source has a commit, create an isolated detached Git worktree under `<data_root>/workspaces/<run_id>` at that HEAD. When HEAD is unborn, create a standalone Git repository there on the same named branch instead. Apply or copy the source's current tracked and non-ignored untracked files into the workspace, then populate a private alternate Git index with the seeded state. If the source has `node_modules`, expose it to the workspace through a symlink so ordinary repository validation remains usable without reinstalling dependencies. Workers and validation commands run only in this workspace.
 
 Record the workspace HEAD in state and require it to remain unchanged through every worker, resume, and terminal node. A mismatch is a boundary violation: stop as `failed`, preserve the workspace, and report the evidence. Derive workflow-only changed files and review diffs against the private index, including non-ignored untracked additions. Ignored files are outside version one's attribution guarantee. Never reset, clean, switch branches, or attempt recovery automatically.
 
@@ -330,7 +333,7 @@ The process lock is released when an interrupt returns control, so persist a rep
 
 A new run refuses a repository with a paused lease or a running lease whose recorded PID is alive. It automatically replaces a running lease when that PID is absent or dead, logging the reclaimed run ID. Create the lease before the first worker call and retain it across pauses and recoverable worker failures. Remove it on terminal completion, failure, abort, caught unexpected exceptions, `SIGINT`, and `SIGTERM`; preserve the last checkpoint and isolated workspace when execution did not reconcile successfully. A hard crash can leave a running lease, but the next run reclaims it after verifying that its owner is dead. Never auto-reclaim a `waiting_for_human` lease.
 
-Immediately before every interrupt, store `paused_worktree_fingerprint`. Compute a stable SHA-256 over the isolated workspace's recorded HEAD and branch, `git diff --binary HEAD`, and sorted path/content hashes for files returned by `git ls-files --others --exclude-standard -z`. This covers persistent Git-visible tracked changes and non-ignored untracked files, but not ignored files or external side effects.
+Immediately before every interrupt, store `paused_worktree_fingerprint`. Compute a stable SHA-256 over the isolated workspace's recorded HEAD state and branch, its tracked and staged diff, and sorted path/content hashes for files returned by `git ls-files --others --exclude-standard -z`. This covers committed and unborn workspaces, persistent Git-visible tracked changes, and non-ignored untracked files, but not ignored files or external side effects.
 
 On resume, acquire the process lock, confirm the lease belongs to the requested run, recompute the fingerprint, and compare it before invoking LangGraph:
 
@@ -375,7 +378,7 @@ Use `hermes -z` with a strict JSON-only prompt. Validate every routing field bef
 
 Catch expected Hermes CLI failures, timeouts, and structured-output parsing failures. Store `workerErrorSource = "planner"` plus `workerError`, then route to an `agent_execution_failed` interrupt. Unexpected application defects still throw and leave the last checkpoint intact.
 
-Planner-selected validation commands become executable only when each one exactly matches a command in a validation-related section of a tracked root `AGENTS.md`. Unmatched suggestions remain advisory, and the workflow pauses when no trusted command remains.
+Planner-selected validation commands become executable only when each one exactly matches a command in a validation-related section of a tracked root `AGENTS.md`. In an unborn repository, the current regular root `AGENTS.md` is part of the captured baseline and is accepted without staging. Unmatched suggestions remain advisory, and the workflow pauses when no trusted command remains.
 
 ### Deterministic review escalation
 
@@ -437,6 +440,8 @@ Version one has three trusted command sources, in precedence order:
 1. Repeated `--validate` arguments supplied by the caller.
 2. `validation_commands` in a Git-tracked `.agent-workflow.json` at the selected repository root.
 3. Planner selections that exactly match commands in setup, build, test, validation, or check sections of a regular, non-symlinked, Git-tracked root `AGENTS.md`.
+
+Before the first commit, the current regular root `.agent-workflow.json` and `AGENTS.md` are trusted as part of the captured source baseline without requiring `git add`. Once a commit exists, the Git-tracked requirement applies normally.
 
 CLI commands replace the JSON list rather than merging with it, and a non-empty JSON list suppresses automatic `AGENTS.md` selection. Do not discover package scripts or execute undocumented planner output. Negated command instructions and commands outside validation-related sections are not eligible. When no trusted source provides a command, pause before Codex with interrupt reason `validation_commands_missing`; resume requires caller-supplied `--validate` arguments or abort.
 
@@ -674,7 +679,7 @@ Run ID: 019abc...
 
 A bare `agent-workflow` starts a new run; `agent-workflow run` remains an explicit alias. A new run resolves the target from `--repo` when supplied and otherwise uses `process.cwd()`. It refuses to reuse an existing ID unless resume is explicit.
 
-When stdin and stdout are terminals, `run` and `resume` render the structured event stream as a local terminal UI by default. A new interactive run prompts for its task when `--task` is omitted; non-interactive runs require the flag instead of waiting for input. `--no-interactive` disables the TUI for explicit structured output, while non-terminal execution stays structured automatically. `p` requests an `operator_pause` after the current graph node, `t` toggles redacted raw output, and the pause accepts continue, corrective guidance, or abort without leaving the process. This is a presentation and control layer over the same graph and checkpointer, not a second workflow runtime.
+When stdin and stdout are terminals, `run` and `resume` render the structured event stream as a local terminal UI with filtered live activity enabled by default. It uses the available terminal height and truncates lines to the current width. Codex runs with JSONL events so the view can show commands, changed file paths, and final messages while suppressing command output, reasoning, and source-code contents. A new interactive run prompts for its task when `--task` is omitted; non-interactive runs require the flag instead of waiting for input. `--no-interactive` disables the TUI for explicit structured output, while non-terminal execution stays structured automatically. `p` requests an `operator_pause` after the current graph node, `t` toggles live activity, and the pause accepts continue, corrective guidance, or abort without leaving the process. This is a presentation and control layer over the same graph and checkpointer, not a second workflow runtime.
 
 ### Status
 
@@ -705,7 +710,7 @@ Validate that the run is waiting, the source-keyed repository lease belongs to i
 
 ## Configuration
 
-Prefer CLI options. The only repository configuration file in version one is an optional, Git-tracked `.agent-workflow.json` at the target repository root, parsed with `JSON.parse()` and validated with Zod:
+Prefer CLI options. The only repository configuration file in version one is an optional root `.agent-workflow.json`, parsed with `JSON.parse()` and validated with Zod. It must be Git-tracked after the first commit; an unborn repository uses the current regular file from its captured baseline:
 
 ```json
 {
@@ -781,7 +786,7 @@ Human interrupt: no automatic timeout
 
 ## Logging
 
-Write structured JSON events through one small logging helper. Without a TUI they go to stderr; the TUI consumes the same objects in process. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. `--verbose` adds redacted worker command metadata, ten-second heartbeats, and completion, while `--trace` also includes redacted stdout and stderr. Hermes one-shot mode exposes only its final response, so the workflow cannot stream Hermes-internal tool calls. Redact likely secrets from captured output before writing logs or checkpoints.
+Write structured JSON events through one small logging helper. Without a TUI they go to stderr; the TUI consumes the same objects in process. Record run ID, node start and completion, duration, selected transition, attempt, subprocess exit status, interrupt creation, resume action, and terminal status. `--verbose` adds redacted worker command metadata, ten-second heartbeats, and completion, while `--trace` also includes filtered activity. Codex JSONL is reduced to command starts, file changes, errors, and final messages; command output, reasoning, and source contents remain captured for workflow use but are not rendered. Hermes one-shot mode exposes only its final response, so the workflow cannot stream Hermes-internal tool calls. Redact likely secrets from captured output before writing logs or checkpoints.
 
 The first version does not require LangSmith.
 
@@ -793,7 +798,7 @@ Test pure routing functions for research decisions, deterministic review escalat
 
 ### Command-wrapper tests
 
-Mock subprocess execution and cover successful and failed Hermes/Codex calls, usable output with nonzero exit, malformed output, timeouts, missing executables, invalid repositories, dirty-worktree isolation, detached-HEAD refusal, HEAD invariants, explicit Codex network/search overrides, validation source selection and shell invocation, and output truncation.
+Mock subprocess execution and cover successful and failed Hermes/Codex calls, usable output with nonzero exit, malformed output, timeouts, missing executables, invalid repositories, dirty and unborn repository isolation, detached-HEAD refusal, HEAD-state invariants, explicit Codex network/search overrides, validation source selection and shell invocation, and output truncation.
 
 ### Graph tests
 
@@ -807,7 +812,7 @@ Use a disposable Git repository with this task:
 Add a function that returns the sum of two integers and add tests.
 ```
 
-Validate with `bun run test`. Confirm a dirty named-branch repository runs in isolation while detached HEAD is refused, runtime files and the worktree stay outside the source repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, workspace HEAD remains fixed, validation executes in the workspace, review runs only when required, pause creates a source-keyed lease and workspace fingerprint, state persists through Bun-native SQLite, status is inspectable, an unchanged workspace resumes, and successful reconciliation applies only the workflow delta.
+Validate with `bun run test`. Confirm dirty and unborn named-branch repositories run in isolation while detached HEAD is refused, runtime files and the workspace stay outside the source repository, Hermes plans without persistent Git-visible changes, Codex shell network and web search are disabled, workspace HEAD state remains fixed, validation executes in the workspace, review runs only when required, pause creates a source-keyed lease and workspace fingerprint, state persists through Bun-native SQLite, status is inspectable, an unchanged workspace resumes, and successful reconciliation applies only the workflow delta.
 
 ## Implementation phases
 
@@ -858,7 +863,8 @@ The first usable release satisfies these criteria:
 - Human input can pause and resume the same checkpoint.
 - Failed validation can finish only through explicit `completed_with_override` semantics.
 - Every reachable recoverable worker failure has an explicit interrupt reason and response set.
-- A new run accepts dirty tracked and non-ignored untracked source state, seeds it into an isolated worktree, and never resets or cleans user changes.
+- A new run accepts dirty tracked and non-ignored untracked source state, seeds it into an isolated workspace, and never resets or cleans user changes.
+- A new run accepts an unborn named branch without requiring or creating an initial commit.
 - A new run refuses detached HEAD and records a named active branch.
 - The isolated workspace HEAD remains unchanged; changed files are derived from its private seeded baseline.
 - Changed-file reporting covers Git-visible files and non-ignored untracked additions; ignored files are explicitly outside the guarantee.

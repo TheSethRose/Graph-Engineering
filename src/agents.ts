@@ -16,6 +16,7 @@ type RunOptions = {
   maxBytes?: number;
   redactOutput?: boolean;
   traceLabel?: string;
+  traceLine?: (stream: "stdout" | "stderr", line: string) => string | undefined;
 };
 
 type CommandTracing = false | "summary" | "full";
@@ -88,10 +89,12 @@ export async function runCommand(
       if (stream === "stdout") tracedStdout = remainder;
       else tracedStderr = remainder;
       for (const line of lines) {
+        const text = options.traceLine ? options.traceLine(stream, line) : line;
+        if (text === undefined) continue;
         traceCommand("command_output", {
           label: options.traceLabel,
           stream,
-          text: redact(line),
+          text: redact(text),
         });
       }
     };
@@ -104,16 +107,18 @@ export async function runCommand(
       });
     }
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      if (Buffer.byteLength(stdout) <= maxBytes) {
+      const capturing = Buffer.byteLength(stdout) <= maxBytes;
+      if (capturing) {
         stdout += chunk;
-        traceLines("stdout", chunk);
       }
+      if (capturing || options.traceLine) traceLines("stdout", chunk);
     });
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-      if (Buffer.byteLength(stderr) <= maxBytes) {
+      const capturing = Buffer.byteLength(stderr) <= maxBytes;
+      if (capturing) {
         stderr += chunk;
-        traceLines("stderr", chunk);
       }
+      if (capturing || options.traceLine) traceLines("stderr", chunk);
     });
     child.on("error", (error) => {
       spawnError = error;
@@ -164,18 +169,20 @@ export async function runCommand(
       if (heartbeat) clearInterval(heartbeat);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (tracing) {
-        if (tracedStdout) {
+        const finalStdout = options.traceLine?.("stdout", tracedStdout) ?? (options.traceLine ? undefined : tracedStdout);
+        if (finalStdout) {
           traceCommand("command_output", {
             label: options.traceLabel,
             stream: "stdout",
-            text: redact(tracedStdout),
+            text: redact(finalStdout),
           });
         }
-        if (tracedStderr) {
+        const finalStderr = options.traceLine?.("stderr", tracedStderr) ?? (options.traceLine ? undefined : tracedStderr);
+        if (finalStderr) {
           traceCommand("command_output", {
             label: options.traceLabel,
             stream: "stderr",
-            text: redact(tracedStderr),
+            text: redact(finalStderr),
           });
         }
         traceCommand("command_complete", {
@@ -223,6 +230,57 @@ const ReviewOutputSchema = z.strictObject({
   findings: z.string(),
 });
 const CodexOutputSchema = z.strictObject({ summary: z.string().min(1) });
+
+function short(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > 180 ? `${oneLine.slice(0, 179)}…` : oneLine;
+}
+
+export function codexTraceLine(stream: "stdout" | "stderr", line: string): string | undefined {
+  if (stream === "stderr" || !line.trim()) return undefined;
+  let event: Record<string, unknown>;
+  try {
+    event = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  const item = event.item && typeof event.item === "object"
+    ? event.item as Record<string, unknown>
+    : undefined;
+  const type = event.type;
+  const itemType = item?.type;
+
+  if (type === "item.started" && itemType === "command_execution") {
+    const command = short(item?.command);
+    return command ? `Run: ${command}` : undefined;
+  }
+  if (type === "item.started" && itemType === "web_search") {
+    const query = short(item?.query);
+    return query ? `Search: ${query}` : "Searching the web.";
+  }
+  if (type === "item.started" && itemType === "mcp_tool_call") {
+    return `Tool: ${short(item?.tool) ?? short(item?.name) ?? "MCP call"}`;
+  }
+  if (type === "item.completed" && itemType === "file_change") {
+    const changes = Array.isArray(item?.changes) ? item.changes : [];
+    const paths = changes.flatMap((change) => {
+      if (!change || typeof change !== "object") return [];
+      const path = (change as Record<string, unknown>).path;
+      return typeof path === "string" ? [path] : [];
+    });
+    return paths.length > 0 ? `Changed: ${paths.join(", ")}` : "Files changed.";
+  }
+  if (type === "item.completed" && itemType === "agent_message") {
+    const message = short(item?.text);
+    return message ? `Codex: ${message}` : undefined;
+  }
+  if (type === "turn.completed") return "Codex turn completed.";
+  if (type === "turn.failed" || type === "error") {
+    return `Codex error: ${short(event.message) ?? short(event.error) ?? "unknown failure"}`;
+  }
+  return undefined;
+}
 
 export type PlannerOutput = z.infer<typeof PlannerOutputSchema>;
 export type ResearchOutput = z.infer<typeof ResearchOutputSchema>;
@@ -292,6 +350,7 @@ export async function runCodex(
     "--ask-for-approval",
     "never",
     "exec",
+    "--json",
     "--cd",
     repo,
     "--sandbox",
@@ -313,11 +372,13 @@ export async function runCodex(
       cwd: repo,
       timeoutMs,
       traceLabel: "coder",
+      traceLine: codexTraceLine,
       recordedArgv: [
         executable,
         "--ask-for-approval",
         "never",
         "exec",
+        "--json",
         "--cd",
         repo,
         "--sandbox",

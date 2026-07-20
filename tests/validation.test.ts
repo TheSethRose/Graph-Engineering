@@ -53,6 +53,43 @@ test("repository preflight accepts dirty named-branch roots", async () => {
   }
 });
 
+test("unborn repositories run from their current files without an initial commit", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "agent-workflow-unborn-"));
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-unborn-data-"));
+  let workspace: Awaited<ReturnType<typeof createWorkflowWorkspace>> | undefined;
+  try {
+    await exec("git", ["init", "-b", "main"], { cwd: repo });
+    await writeFile(join(repo, "README.md"), "before\n");
+    await writeFile(join(repo, "AGENTS.md"), "## Validation\n\n`node verify.mjs`\n");
+
+    const baseline = await preflightRepository(repo);
+    assert.equal(baseline.head, "");
+    assert.equal(baseline.branch, "main");
+    assert.deepEqual(
+      await trustedAgentValidationCommands(repo, ["node verify.mjs"]),
+      ["node verify.mjs"],
+    );
+
+    workspace = await createWorkflowWorkspace(baseline, "unborn-test", join(root, "data"));
+    assert.equal(await readFile(join(workspace.repo, "README.md"), "utf8"), "before\n");
+    assert.deepEqual(await workspaceChangedFiles(workspace.repo, workspace.indexPath), []);
+
+    await writeFile(join(workspace.repo, "README.md"), "after\n");
+    assert.deepEqual(
+      await reconcileWorkflowWorkspace(repo, workspace.repo, workspace.indexPath),
+      ["README.md"],
+    );
+    workspace = undefined;
+    assert.equal(await readFile(join(repo, "README.md"), "utf8"), "after\n");
+  } finally {
+    if (workspace) {
+      await discardWorkflowWorkspace(repo, workspace.repo, workspace.indexPath).catch(() => undefined);
+    }
+    await rm(repo, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("isolated workspaces preserve dirty source changes and apply only the workflow delta", async () => {
   const repo = await repository();
   const root = await mkdtemp(join(tmpdir(), "agent-workflow-workspace-"));

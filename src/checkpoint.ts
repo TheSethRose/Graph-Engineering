@@ -10,6 +10,7 @@ import {
   readlink,
   realpath,
   rename,
+  rm,
   stat,
   symlink,
   unlink,
@@ -77,6 +78,30 @@ async function git(repo: string, args: string[], maxBytes = 32 * 1024 * 1024): P
   return result.stdout;
 }
 
+async function gitHead(repo: string): Promise<string> {
+  const result = await runCommand("git", ["rev-parse", "--verify", "HEAD"], {
+    cwd: repo,
+    timeoutMs: 30_000,
+    redactOutput: false,
+  });
+  if (result.exitCode === 0 && !result.timedOut) return result.stdout.trim();
+  if (result.exitCode === 128 && /Needed a single revision|unknown revision|ambiguous argument/i.test(result.stderr)) {
+    return "";
+  }
+  throw new Error(`git rev-parse --verify HEAD failed: ${result.stderr || result.stdout}`);
+}
+
+async function gitBranch(repo: string): Promise<string> {
+  const result = await runCommand("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+    cwd: repo,
+    timeoutMs: 30_000,
+    redactOutput: false,
+  });
+  if (result.exitCode === 0 && !result.timedOut) return result.stdout.trim();
+  if (result.exitCode === 1 && !result.timedOut) return "";
+  throw new Error(`git symbolic-ref --quiet --short HEAD failed: ${result.stderr || result.stdout}`);
+}
+
 async function indexedGit(
   repo: string,
   indexPath: string,
@@ -105,9 +130,9 @@ export async function preflightRepository(path: string): Promise<GitBaseline> {
   if ((await realpath(root)) !== repo) {
     throw new Error("--repo must name the root of an existing Git worktree.");
   }
-  const branch = (await git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
+  const branch = await gitBranch(repo);
   if (!branch) throw new Error("Repository is in detached HEAD state.");
-  const head = (await git(repo, ["rev-parse", "HEAD"])).trim();
+  const head = await gitHead(repo);
   return { repo, head, branch };
 }
 
@@ -134,32 +159,49 @@ export async function createWorkflowWorkspace(
   const indexPath = join(root, `${runId}.index`);
   const sourcePatch = join(root, `${runId}.source.patch`);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await git(source.repo, ["worktree", "add", "--detach", repo, source.head]);
+  if (source.head) {
+    await git(source.repo, ["worktree", "add", "--detach", repo, source.head]);
+  } else {
+    await mkdir(repo, { mode: 0o700 });
+    await git(repo, ["init", "-b", source.branch]);
+  }
   try {
-    const patch = await git(source.repo, ["diff", "--binary", "HEAD"]);
-    if (patch) {
-      await writeFile(sourcePatch, patch, { mode: 0o600 });
-      await git(repo, ["apply", "--binary", sourcePatch]);
+    if (source.head) {
+      const patch = await git(source.repo, ["diff", "--binary", "HEAD"]);
+      if (patch) {
+        await writeFile(sourcePatch, patch, { mode: 0o600 });
+        await git(repo, ["apply", "--binary", sourcePatch]);
+      }
     }
-    const untracked = (await git(source.repo, [
+    const copied = (await git(source.repo, [
       "ls-files",
-      "--others",
+      ...(source.head ? ["--others"] : ["--cached", "--others"]),
       "--exclude-standard",
       "-z",
     ])).split("\0").filter(Boolean);
-    await Promise.all(untracked.map((path) => copyUntrackedFile(source.repo, repo, path)));
+    await Promise.all(copied.map((path) => copyUntrackedFile(source.repo, repo, path)));
     const sourceModules = join(source.repo, "node_modules");
     if ((await stat(sourceModules).catch(() => undefined))?.isDirectory()) {
       await symlink(sourceModules, join(repo, "node_modules"), "dir").catch((error) => {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       });
     }
-    await indexedGit(repo, indexPath, ["read-tree", "HEAD"]);
+    if (source.head) await indexedGit(repo, indexPath, ["read-tree", "HEAD"]);
     await indexedGit(repo, indexPath, ["add", "-A", "--", "."]);
     await unlink(sourcePatch).catch(() => undefined);
-    return { repo, head: source.head, branch: "", sourceRepo: source.repo, indexPath };
+    return {
+      repo,
+      head: source.head,
+      branch: source.head ? "" : source.branch,
+      sourceRepo: source.repo,
+      indexPath,
+    };
   } catch (error) {
-    await git(source.repo, ["worktree", "remove", "--force", repo]).catch(() => undefined);
+    if (source.head) {
+      await git(source.repo, ["worktree", "remove", "--force", repo]).catch(() => undefined);
+    } else {
+      await rm(repo, { recursive: true, force: true });
+    }
     await Promise.all([
       unlink(indexPath).catch(() => undefined),
       unlink(sourcePatch).catch(() => undefined),
@@ -204,7 +246,9 @@ export async function discardWorkflowWorkspace(
   repo: string,
   indexPath: string,
 ): Promise<void> {
-  await git(sourceRepo, ["worktree", "remove", "--force", repo]);
+  const standalone = (await lstat(join(repo, ".git")).catch(() => undefined))?.isDirectory();
+  if (standalone) await rm(repo, { recursive: true, force: true });
+  else await git(sourceRepo, ["worktree", "remove", "--force", repo]);
   await unlink(indexPath).catch(() => undefined);
 }
 
@@ -237,9 +281,8 @@ export async function reconcileWorkflowWorkspace(
 export async function assertGitInvariants(
   baseline: GitBaseline,
 ): Promise<string | undefined> {
-  const head = (await git(baseline.repo, ["rev-parse", "HEAD"])).trim();
-  const branchName = (await git(baseline.repo, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
-  const branch = branchName === "HEAD" ? "" : branchName;
+  const head = await gitHead(baseline.repo);
+  const branch = await gitBranch(baseline.repo);
   if (head !== baseline.head || branch !== baseline.branch) {
     return `Git boundary violation: expected ${baseline.branch}@${baseline.head}, found ${branch || "detached HEAD"}@${head}.`;
   }
@@ -277,7 +320,12 @@ export async function worktreeFingerprint(baseline: GitBaseline): Promise<string
   const invariant = await assertGitInvariants(baseline);
   if (invariant) throw new Error(invariant);
   const [diff, lsFiles] = await Promise.all([
-    git(baseline.repo, ["diff", "--binary", "HEAD"]),
+    baseline.head
+      ? git(baseline.repo, ["diff", "--binary", "HEAD"])
+      : Promise.all([
+          git(baseline.repo, ["diff", "--binary"]),
+          git(baseline.repo, ["diff", "--cached", "--binary"]),
+        ]).then((parts) => parts.join("")),
     git(baseline.repo, [
       "ls-files",
       "--others",
@@ -295,13 +343,19 @@ export async function worktreeFingerprint(baseline: GitBaseline): Promise<string
 }
 
 export async function worktreeEvidence(repo: string): Promise<string> {
+  const head = await gitHead(repo);
   const [status, diff] = await Promise.all([
     git(repo, [
       "status",
       "--porcelain=v1",
       "--untracked-files=all",
     ]),
-    git(repo, ["diff", "--stat", "HEAD"]),
+    head
+      ? git(repo, ["diff", "--stat", "HEAD"])
+      : Promise.all([
+          git(repo, ["diff", "--stat"]),
+          git(repo, ["diff", "--cached", "--stat"]),
+        ]).then((parts) => parts.join("")),
   ]);
   return `${status}${diff}`.trim();
 }

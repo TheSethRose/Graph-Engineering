@@ -85,7 +85,7 @@ Run options:
   --codex-timeout-seconds N         Positive Codex timeout in seconds.
   --validation-timeout-seconds N    Positive timeout for each validation command.
   --verbose                         Show redacted commands, heartbeats, and exit details.
-  --trace                           Include redacted worker stdout and stderr.
+  --trace                           Include filtered worker activity when not using the TUI.
   --interactive                     Require the TUI even when terminal detection is unavailable.
   --no-interactive                  Disable the default TUI and print structured output.
 
@@ -94,7 +94,7 @@ Resume options:
   --message MESSAGE                 Required for revise and override responses.
   --validate COMMAND                Repeatable; allowed only with provide_validation.
   --verbose                         Show redacted commands, heartbeats, and exit details.
-  --trace                           Include redacted worker stdout and stderr.
+  --trace                           Include filtered worker activity when not using the TUI.
   --interactive                     Require the TUI even when terminal detection is unavailable.
   --no-interactive                  Disable the default TUI and print structured output.
 
@@ -245,7 +245,7 @@ function startInterface(parsed: Parsed): WorkflowTui | undefined {
   const interactive =
     !parsed.options.has("--no-interactive") &&
     (parsed.options.has("--interactive") || (process.stdin.isTTY && process.stdout.isTTY));
-  const trace = parsed.options.has("--trace");
+  const trace = parsed.options.has("--trace") || interactive;
   setCommandTracing(trace ? "full" : parsed.options.has("--verbose") || interactive ? "summary" : false);
   if (!interactive) return undefined;
   const tui = new WorkflowTui(

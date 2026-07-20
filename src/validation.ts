@@ -29,6 +29,20 @@ export type ConfigOverrides = Partial<
   Omit<WorkflowConfig, "validationCommands" | "validationSource">
 > & { validationCommands?: string[] };
 
+async function trackedOrUnborn(repo: string, path: string): Promise<boolean> {
+  const tracked = await runCommand(
+    "git",
+    ["ls-files", "--error-unmatch", "--", path],
+    { cwd: repo, timeoutMs: 10_000 },
+  );
+  if (tracked.exitCode === 0) return true;
+  const head = await runCommand("git", ["rev-parse", "--verify", "HEAD"], {
+    cwd: repo,
+    timeoutMs: 10_000,
+  });
+  return head.exitCode === 128 && /Needed a single revision/i.test(head.stderr);
+}
+
 export function isValidationEnvironmentFailure(result: CommandResult): boolean {
   const output = `${result.stdout}\n${result.stderr}`;
   return (
@@ -53,13 +67,8 @@ async function trackedConfig(repo: string): Promise<z.infer<typeof RepoConfigSch
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  const tracked = await runCommand(
-    "git",
-    ["ls-files", "--error-unmatch", "--", ".agent-workflow.json"],
-    { cwd: canonicalRepo, timeoutMs: 10_000 },
-  );
-  if (tracked.exitCode !== 0) {
-    throw new Error(".agent-workflow.json exists but is not Git-tracked.");
+  if (!(await trackedOrUnborn(canonicalRepo, ".agent-workflow.json"))) {
+    throw new Error(".agent-workflow.json exists but is not Git-tracked in a repository with commits.");
   }
   try {
     return RepoConfigSchema.parse(JSON.parse(await readFile(path, "utf8")));
@@ -142,12 +151,9 @@ export async function trustedAgentValidationCommands(
     throw error;
   }
 
-  const tracked = await runCommand(
-    "git",
-    ["ls-files", "--error-unmatch", "--", "AGENTS.md"],
-    { cwd: canonicalRepo, timeoutMs: 10_000 },
-  );
-  if (tracked.exitCode !== 0) throw new Error("AGENTS.md exists but is not Git-tracked.");
+  if (!(await trackedOrUnborn(canonicalRepo, "AGENTS.md"))) {
+    throw new Error("AGENTS.md exists but is not Git-tracked in a repository with commits.");
+  }
 
   const documented = documentedValidationCommands(await readFile(path, "utf8"));
   return [...new Set(suggestions.map((command) => command.trim()))].filter((command) =>

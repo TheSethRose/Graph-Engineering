@@ -852,7 +852,7 @@ else if (args[0] === "exec" && args[1] === "--help") process.stdout.write("--cd 
         ],
         { cwd: process.cwd(), env },
       ),
-      /git rev-parse HEAD failed/,
+      /git rev-parse .*HEAD failed/,
     );
     assert.deepEqual(
       JSON.parse(await readFile(join(dataHome, "agent-workflow", "active-runs.json"), "utf8")),

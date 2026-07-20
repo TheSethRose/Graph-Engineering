@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "bun:test";
 import {
+  codexTraceLine,
   loadAgentEnvironment,
   redact,
   runCodex,
@@ -105,6 +106,31 @@ test("command tracing separates concise progress from redacted raw output", asyn
     setCommandTracing(false);
     process.stderr.write = originalWrite;
   }
+});
+
+test("Codex tracing shows actions without command output or source contents", () => {
+  assert.equal(
+    codexTraceLine("stdout", JSON.stringify({
+      type: "item.started",
+      item: { type: "command_execution", command: "rg -n trace src" },
+    })),
+    "Run: rg -n trace src",
+  );
+  assert.equal(
+    codexTraceLine("stdout", JSON.stringify({
+      type: "item.completed",
+      item: { type: "command_execution", aggregated_output: "const sourceContents = true;" },
+    })),
+    undefined,
+  );
+  assert.equal(
+    codexTraceLine("stdout", JSON.stringify({
+      type: "item.completed",
+      item: { type: "file_change", changes: [{ path: "README.md", kind: "update" }] },
+    })),
+    "Changed: README.md",
+  );
+  assert.equal(codexTraceLine("stderr", "internal transport noise"), undefined);
 });
 
 test("runCommand terminates descendant processes when it times out", async () => {
